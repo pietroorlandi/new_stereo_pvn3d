@@ -402,6 +402,7 @@ class _6IMPOSE(_Dataset):
             _bbox, _crop_factor = StereoPvn3d.get_crop_index(
                 bbox[None], h, w, 160, 160
             )
+            print(f"_bbox")
 
             xyz, feats, pcld_index = StereoPvn3d.pcld_processor_tf(
                 (rgb[None] / 255.0).astype(np.float32),
@@ -412,7 +413,7 @@ class _6IMPOSE(_Dataset):
             )
             print(f"xyz point cloud shape: {xyz.shape} - xyz point cloud: {xyz}")
             pcld_rgb = get_pcld_rgb(rgb, pcld_index)
-            print(f"pcld_index : {pcld_index} - max: {tf.math.reduce_max(pcld_index)} - min: {tf.math.reduce_min(pcld_index)} - mean: {tf.math.reduce_m(pcld_index)}")
+            print(f"pcld_index : {pcld_index} - max: {tf.math.reduce_max(pcld_index)} - min: {tf.math.reduce_min(pcld_index)} - mean: {tf.math.reduce_mean(pcld_index)}")
 
             # index_chosen = self.choose_index(pcld_index)
             # pcld_xyz_rgb = np.concatenate((pcld_xyz, pcld_rgb), axis=1)[index_chosen, :] 
