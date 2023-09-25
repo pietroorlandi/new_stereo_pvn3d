@@ -1,0 +1,35 @@
+num_validate: 15
+#weights: "checkpoints/TrainE2E/model_32" # this is trained on multi
+#weights: "checkpoints/cpsduck (continued)/model_*"
+#weights: "checkpoints/lm_cam (continued)/model_*"
+#weights: "checkpoints/lm_cam (no-seg loss)/model_*"
+
+datasets:
+  - Val6IMPOSE
+  - Train6IMPOSE
+  #- LineMOD
+  #- ValBlender
+
+shared: &shared
+  cls_type: cpsduck
+  batch_size: 32
+  use_cache: False
+
+Val6IMPOSE:
+  <<: *shared
+  root: "/home/porlandi/Documents/Dataset"
+  train_split: 0.9
+  #cutoff: 1000
+  n_aug_per_image: 1
+  n_objects_per_image: 5
+  add_bbox_noise: false
+  bbox_noise: 20 # shift by how many pixels
+
+Train6IMPOSE:
+  <<: *shared
+  root: "/home/porlandi/Documents/Dataset"
+  train_split: 0.1
+  #cutoff: 1000
+  n_aug_per_image: 1
+  n_objects_per_image: 5
+  add_bbox_noise: false

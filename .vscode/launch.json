@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: CVDE GUI",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/porlandi/miniconda3/envs/cvde_new/bin/streamlit",
+            "args": [
+                "run",
+                "/home/porlandi/miniconda3/envs/cvde_new/lib/python3.10/site-packages/cvde/gui.py"
+            ],
+            "justMyCode": true
+        }
+    ]
+}

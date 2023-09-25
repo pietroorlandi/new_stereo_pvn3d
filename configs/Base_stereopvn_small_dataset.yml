@@ -1,0 +1,90 @@
+# -- RESERVED --
+# Define your Job
+Train_Dataset: TrainBlender
+Val_Dataset: ValBlender
+Model: StereoPvn3d
+Loss: StereoPvn3dLoss
+Optimizer: Adam
+Callbacks: # TO be revised
+  - DemoInferencePvn
+  - ModelCheckpoint
+  - TensorBoard
+  #- LossHistoryCallback
+  #- ReduceLROnPlateau
+gpus: ['0']# if multiple gpus then distributed training is used
+model_fit:
+  epochs: 60
+mounts:
+  - "/home/egovi/Pietro/Repo/stereo_pvn3d/datasets/dataset_small"
+# --- ---
+# Define Kwargs for modules below
+
+TensorBoard:
+  log_dir: "log_dir"
+  profile_batch: [5, 10]
+
+Adam:
+  learning_rate: 0.0005
+  
+TrainBlender:
+  batch_size: 2
+  root: "/home/egovi/Pietro/Repo/stereo_pvn3d/datasets/dataset_small"
+  data_name: stereo_test
+  if_pose: true
+  cls_type: cpsduck
+  train_split: 0.5
+  use_cache: true
+  im_size:
+    - 480
+    - 640
+    
+ValBlender: &val_config
+  batch_size: 4
+  root: "/home/egovi/Pietro/Repo/stereo_pvn3d/datasets/dataset_small"
+  data_name: stereo_test
+  if_pose: true
+  cls_type: cpsduck
+  train_split: 0.5
+  use_cache: false
+  im_size:
+    - 480
+    - 640
+
+StereoPvn3d:
+  rgb_shape : [640, 480, 3]
+  use_disparity: true
+  relative_disparity: false
+  channel_multiplier: 4 # original: 4
+  base_channels: [1,2,4,8,16,32]
+  num_pts: 1500
+  num_kpt: 8
+  num_cls: 1
+  num_cpts: 1
+  dim_xyz: 3
+
+DemoInferencePvn:
+  num_validate: 5
+  data_cfg: *val_config
+  
+LossHistoryCallback:
+  loss_names: ["mlse_loss", "ssim_loss", "cp_loss", "kp_loss", "seg_loss"]
+
+StereoPvn3dLoss:
+  mse_loss_discount: 0.005
+  l1_loss_discount: 0
+  ssim_loss_discount: 0.5
+  mlse_loss_discount: 0.5
+  seg_loss_discount: 0.5
+  ssim_max_val: 1.5
+  ssim_filter_size: 40
+  ssim_k1: 0.5
+  ssim_k2: 1.5
+  kp_loss_discount: 1
+  cp_loss_discount: 1
+  sm_loss_discount: 1
+  kp_cp_loss_discount: 1
+  kp_cp_ofst_loss_discount: 1
+  
+StereoPvn3dMetrics:
+  name: "stereo_pvn3d_metrics"
+
