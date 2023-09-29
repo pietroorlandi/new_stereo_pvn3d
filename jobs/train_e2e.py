@@ -17,8 +17,10 @@ class TrainE2E(cvde.job.Job):
         self.num_validate = job_cfg["num_validate"]
 
         print("Running job: ", self.name)
+        print(f"job_cfg['StereoPvn3d']: {job_cfg['StereoPvn3d']}")
+        
+        self.model = model = StereoPvn3d(**job_cfg["StereoPvn3d"])
 
-        self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
         if job_cfg["dataset"] == 'blender':
             train_config = job_cfg["TrainBlender"]
             val_config = job_cfg["ValBlender"]
@@ -49,6 +51,9 @@ class TrainE2E(cvde.job.Job):
         num_epochs = job_cfg["epochs"]
         train_set_tf = train_set.to_tf_dataset()
         val_set_tf = val_set.to_tf_dataset()
+        cumulative_steps = 0
+
+         # Not executed for now
         for epoch in range(num_epochs):
             bar = tqdm(
                 total=len(train_set) // train_set.batch_size,
@@ -57,17 +62,26 @@ class TrainE2E(cvde.job.Job):
 
             loss_vals = {}
             for x, y in train_set_tf:
+                print(f"len(x): {len(x)}")
+                print(f"len(y): {len(y)}")
+
                 if self.is_stopped():
                     return
-
+                print(f"cum_steps {cumulative_steps} - before with tf.GradientTape()")
                 with tf.GradientTape() as tape:
+                    print(f"cum_steps {cumulative_steps} - inside tf.GradientTape()")
                     pred = model(x, training=True)
-
-                loss_combined, mlse_loss, ssim_loss, loss_cp, loss_kp, loss_seg = loss_fn.call(y, pred)
+                    print(f"cum_steps {cumulative_steps} - get prediction inside tf.GradientTape()")
+                    loss_combined, mse_loss, mlse_loss, ssim_loss, loss_cp, loss_kp, loss_seg = loss_fn.call(y, pred)
+                    print(f"cum_steps {cumulative_steps} - get loss inside tf.GradientTape()")
+                print(f"cum_steps {cumulative_steps} - exit from tf.GradientTape()")
                 gradients = tape.gradient(loss_combined, model.trainable_variables)
+                print(f"cum_steps {cumulative_steps} - after tape.gradient()")
                 optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+                print(f"cum_steps {cumulative_steps} - after apply_gradient()")
 
                 loss_vals["loss"] = loss_vals.get("loss", []) + [loss_combined.numpy()]
+                loss_vals["mse_loss"] = loss_vals.get("mse_loss", []) + [mse_loss.numpy()]
                 loss_vals["mlse_loss"] = loss_vals.get("mlse_loss", []) + [mlse_loss.numpy()]
                 loss_vals["ssim_loss"] = loss_vals.get("ssim_loss", []) + [ssim_loss.numpy()]
                 loss_vals["loss_cp"] = loss_vals.get("loss_cp", []) + [loss_cp.numpy()]
@@ -80,6 +94,7 @@ class TrainE2E(cvde.job.Job):
                         "loss": millify(loss_combined.numpy(), precision=4),
                     }
                 )
+                cumulative_steps+=1
 
             bar.close()
             model.save(f"checkpoints/{self.tracker.name}/model_{epoch:02}", save_format="tf")
@@ -88,7 +103,7 @@ class TrainE2E(cvde.job.Job):
                 loss_vals[k] = tf.reduce_mean(v)
                 self.tracker.log(f"train_{k}", loss_vals[k], epoch)
 
-            self.log_visualization(epoch)
+            #self.log_visualization(epoch)
 
             loss_vals = {}
             for x, y in tqdm(
@@ -96,7 +111,10 @@ class TrainE2E(cvde.job.Job):
                 desc=f"Val ({epoch}/{num_epochs-1})",
                 total=len(val_set) // val_set.batch_size,
             ):
-                _, _, _, pred = model(x, training=False)
+
+                pred = model(x, training=False)
+                print(f"len(pred): {len(pred)}")
+
                 l = loss_fn.call(y, pred)
                 for k, v in zip(["loss","mlse_loss","ssim_loss","loss_cp", "loss_kp", "loss_seg"], l):
                     loss_vals[k] = loss_vals.get(k, []) + [v]
@@ -110,58 +128,48 @@ class TrainE2E(cvde.job.Job):
         for x, y in self.demo_set_tf:
             (
                 b_rgb,
-                b_depth,
+                b_rgb_R,
+                b_baseline,
                 b_intrinsics,
-                b_roi,
-                b_mesh_kpts,
+                b_sampled_inds_in_roi,
+                b_depth,
+                b_new_bbox,
             ) = x
 
-            b_RT_gt, b_mask = y
+            b_depth_gt, b_kp_offsets_gt, b_cp_offsets_gt, b_mask_selected_gt, b_xyz_gt = y
 
-            (
-                b_R,
-                b_t,
-                b_kpts_pred,
-                (b_kp_offset, b_seg_pred, b_cp_offset, b_xyz, b_sampled_inds, _, b_cropped_rgb),
-            ) = self.model(x, training=False)
+            # (
+            #     b_R,
+            #     b_t,
+            #     b_kpts_pred,
+            #     (b_kp_offset, b_seg_pred, b_cp_offset, b_xyz, b_sampled_inds, _, b_cropped_rgb),
+            # ) = self.model(x, training=False)
+            b_depth_pred, b_kp_offset_pred, b_mask_selected_pred, b_cp_offset_pred, b_norm_bbox = self.model(x, training=False)
 
             h, w = tf.shape(b_rgb)[1], tf.shape(b_rgb)[2]
-            b_roi, b_crop_factor = self.model.get_crop_index(
-                b_roi,
-                h,
-                w,
-                self.model.resnet_input_shape[0],
-                self.model.resnet_input_shape[1],
-            )
 
             b_rgb = b_rgb.numpy()
-            b_roi = b_roi.numpy()
-            b_mask = b_mask.numpy()
-            b_seg_pred = b_seg_pred.numpy()
-            b_sampled_inds = b_sampled_inds.numpy()
-            b_kp_offset = b_kp_offset.numpy()
+            b_roi = b_new_bbox.numpy()
+            b_mask = b_mask_selected_gt.numpy()
+            b_seg_pred = b_mask_selected_pred.numpy()
+            b_sampled_inds = b_sampled_inds_in_roi.numpy()
+            b_kp_offset = b_kp_offset_pred.numpy()
             b_cropped_rgb = b_cropped_rgb.numpy()
-            b_cp_offset = b_cp_offset.numpy()
-            b_R = b_R.numpy()
-            b_t = b_t.numpy()
-            b_RT_gt = b_RT_gt.numpy()
+            b_cp_offset = b_cp_offset_pred.numpy()
+            # b_R = b_R.numpy()
+            # b_t = b_t.numpy()
+            # b_RT_gt = b_RT_gt.numpy()
             b_intrinsics = b_intrinsics.numpy()
-            b_crop_factor = b_crop_factor.numpy()
+            #b_crop_factor = b_crop_factor.numpy()
 
             # get gt offsets
             b_offsets_pred = np.concatenate([b_kp_offset, b_cp_offset], axis=2)
             b_mask_selected = tf.gather_nd(b_mask, b_sampled_inds)
-            b_kp_offsets_gt, b_cp_offsets_gt = self.loss_fn.get_offst(
-                b_RT_gt,
-                b_xyz,
-                b_mask_selected,
-                b_mesh_kpts,
-            )
             b_offsets_gt = np.concatenate([b_kp_offsets_gt, b_cp_offsets_gt], axis=2)
 
             # keypoint vectors
-            b_kpts_vectors_pred = b_xyz[:, :, None, :].numpy() + b_offsets_pred  # [b, n_pts, 9, 3]
-            b_kpts_vectors_gt = b_xyz[:, :, None, :].numpy() + b_offsets_gt
+            b_kpts_vectors_pred = b_xyz_gt[:, :, None, :].numpy() + b_offsets_pred  # [b, n_pts, 9, 3]
+            b_kpts_vectors_gt = b_xyz_gt[:, :, None, :].numpy() + b_offsets_gt
 
             # keypoints
             b_kpts_gt = (

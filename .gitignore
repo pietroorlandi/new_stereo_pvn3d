@@ -1,0 +1,11 @@
+__pycache__
+.vscode/
+*.pyc
+*.so
+*.o
+log/
+.keras
+.mypy_cache
+.cache/
+.local/
+checkpoints/**

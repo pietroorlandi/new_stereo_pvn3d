@@ -132,7 +132,7 @@ def bbox_ciou(boxes1, boxes2):
     return iou - ciou_term
 
 
-@tf.function
+#@tf.function
 def map_indices_to_feature_map(indices, resnet_shape, image_shapes):
     """ indices: [b, n_sample_points]
         resnet_shape: (h,w)
@@ -252,7 +252,7 @@ def dpt_2_cld_with_roi(dpt, roi, cam_scale, cam_intrinsic, xy_offset=(0, 0), dep
 
 
 
-@tf.function
+#@tf.function
 def dpt_2_cld_tf(dpt, cam_scale, cam_intrinsic, xy_offset=(0, 0), depth_trunc=2.0):
     import tensorflow as tf
     """
@@ -389,7 +389,7 @@ def get_pcld_rgb(rgb, pcld_index):
     """
     return rgb.reshape((-1, 3))[pcld_index]
 
-@tf.function
+#@tf.function
 def compute_normal_map(depth, camera_matrix):
     kernel = np.array([[[[0.5, 0.5]], [[-0.5, 0.5]]], [[[0.5, -0.5]], [[-0.5, -0.5]]]])
     # print('Kernel filter shape ', kernel.shape)

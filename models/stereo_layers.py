@@ -14,7 +14,8 @@ from tensorflow.keras.regularizers import l2
 
 class ResInitial(keras.layers.Layer):
     def __init__(self, filters, name="resinit"):
-        super(ResInitial, self).__init__()
+        print(f"type(self): {type(self)}")
+        super().__init__()
         self.f1, self.f2 = filters
         self.f1 = max(self.f1, 8)
         self.f2 = max(self.f2, 8)
@@ -55,7 +56,7 @@ class ResInitial(keras.layers.Layer):
 
 class ResIdentity(keras.layers.Layer):
     def __init__(self, filters, name="residentity"):
-        super(ResIdentity, self).__init__()
+        super().__init__()
         self.f1, self.f2 = filters
         self.f1 = max(self.f1, 8)
         self.f2 = max(self.f2, 8)
@@ -119,7 +120,7 @@ class ResIdentity(keras.layers.Layer):
 
 class ResReduce(keras.layers.Layer):
     def __init__(self, depth, name="resreduce"):
-        super(ResReduce, self).__init__()
+        super().__init__()
         self.depth = depth
         # second block # bottleneck (but size kept same with padding)
         self.conv_1 = Conv2D(
@@ -143,7 +144,7 @@ class ResReduce(keras.layers.Layer):
 
 class ResUp(keras.layers.Layer):
     def __init__(self, s, filters, name="resup"):
-        super(ResUp, self).__init__()
+        super().__init__()
         self.f1, self.f2 = filters
         self.s = s
         self.f1 = max(self.f1, 8)
@@ -226,7 +227,7 @@ class ResUp(keras.layers.Layer):
 
 class ResConv(keras.layers.Layer):
     def __init__(self, s, filters, name="resconv"):
-        super(ResConv, self).__init__()
+        super().__init__()
         self.f1, self.f2 = filters
         self.s = s
         self.f1 = max(self.f1, 8)
@@ -568,7 +569,7 @@ class DisparityAttention(tf.keras.layers.Layer):
 
 class ContextAdj(keras.layers.Layer):
     def __init__(self, filter, name="contextadj"):
-        super(ContextAdj, self).__init__()
+        super().__init__()
         self.conv1 = Conv2D(filter, kernel_size=(3, 3), padding="same")
         self.conv2 = Conv2D(1, kernel_size=(3, 3), padding="same")
         self.relu = Activation(activations.relu)
@@ -580,19 +581,3 @@ class ContextAdj(keras.layers.Layer):
         x = self.relu(x)
         outputs = self.conv2(x)
         return outputs
-
-
-class Prova(keras.layers.Layer):
-    def __init__(self, name="prova"):
-        super(Prova, self).__init__()
-        self.conv = Conv2D(
-            filters=3,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding="same",
-            activation="relu",
-        )
-
-    def call(self, inputs):
-        x = self.conv(inputs)
-        return x

@@ -16,14 +16,13 @@ from tensorflow.python.keras import Input
 import tensorflow as tf
 
 from models.densefusion import DenseFusionNet, DenseFusionNetParams
-
+from .pprocessnet import _InitialPoseModel
 from metrics.stereo_pvn3d_metrics import StereoPvn3dMetrics
 
 from tensorflow.keras import Input
 from tensorflow.keras.layers import Conv2D
 from .stereo_layers import (
     ResInitial,
-    Prova,
     ResUp,
     ResConv,
     ResReduce,
@@ -40,64 +39,18 @@ from .mlp import MlpNets, MlpNetsParams
 from .utils import match_choose_adp, dpt_2_cld, dpt_2_cld_tf, match_choose, pcld_processor_tf
 
 
-def build_resnet(channel_multiplier, deep=False, name="resnet"):
-    base_channels = [1, 2, 4, 8, 16, 32]
-    f10, f11, f12, f13, f14, f15 = [x * channel_multiplier for x in base_channels]
-    f20, f21, f22, f23, f24, f25 = [x * 4 * channel_multiplier for x in base_channels]
-    input = Input(shape=(480, 640, 3), name="rgb")
-    # write all the code with layers
-    x = ResInitial(filters=(f10, f20), name=f"{name}_initial")(input)
-    if deep:
-        x = ResIdentity(filters=(f10, f20), name=f"{name}_1_1")(x)
-    x_1 = x
-    x = ResConv(s=2, filters=(f11, f21), name=f"{name}_1_2")(x)
-    if deep:
-        x = ResIdentity(filters=(f11, f21), name=f"{name}_2_1")(x)
-        x = ResIdentity(filters=(f11, f21), name=f"{name}_2_2")(x)
-    x_2 = x
-    x = ResConv(s=2, filters=(f12, f22), name=f"{name}_2_3")(x)
-    # 3rd stage
-    if deep:
-        x = ResIdentity(filters=(f12, f22), name=f"{name}_3_1")(x)
-        x = ResIdentity(filters=(f12, f22), name=f"{name}_3_2")(x)
-    x = ResIdentity(filters=(f12, f22), name=f"{name}_3_3")(x)
-    x_3 = x
-    x = ResConv(s=2, filters=(f13, f23), name=f"{name}_3_4")(x)
-    # 4th stage
-    if deep:
-        x = ResIdentity(filters=(f13, f23), name=f"{name}_4_1")(x)
-        x = ResIdentity(filters=(f13, f23), name=f"{name}_4_2")(x)
-        x = ResIdentity(filters=(f13, f23), name=f"{name}_4_3")(x)
-    x = ResIdentity(filters=(f13, f23), name=f"{name}_4_4")(x)
-    x_4 = x
-    x = ResConv(s=2, filters=(f14, f24), name=f"{name}_4_5")(x)
-    # 5th stage
-    if deep:
-        x = ResIdentity(filters=(f14, f24), name=f"{name}_5_1")(x)
-        x = ResIdentity(filters=(f14, f24), name=f"{name}_5_2")(x)
-        x = ResIdentity(filters=(f14, f24), name=f"{name}_5_3")(x)
-        x = ResIdentity(filters=(f14, f24), name=f"{name}_5_4")(x)
-    x = ResIdentity(filters=(f14, f24), name=f"{name}_5_5")(x)
-    x_5 = x
-
-    output = [x_1, x_2, x_3, x_4, x_5]
-    model = keras.Model(inputs=input, outputs=output, name="resnet_model")
-
-    return model
-
-
 class StereoPvn3d(keras.Model):
     def __init__(
         self,
         *,
-        rgb_shape,
+        resnet_input_shape,
         use_disparity,
         relative_disparity,
         channel_multiplier,
         base_channels,
-        num_pts=30000,
+        num_pts,
         num_kpts=8, 
-        num_cls=6, 
+        num_cls=1, 
         num_cpts=1, 
         dim_xyz=3,
         context_adj=False,
@@ -108,20 +61,23 @@ class StereoPvn3d(keras.Model):
         self.relative_disparity = relative_disparity
         self.context_adjustment = context_adj
         self.channel_multiplier = channel_multiplier
-        self.resnet_lr = build_resnet(self.channel_multiplier)
         self.num_pts = num_pts
         self.num_kpts = num_kpts
         self.num_cls = num_cls
         self.num_cpts = num_cpts
         self.dim_xyz = dim_xyz
+        self.resnet_input_shape = resnet_input_shape
         self.mlp_params = MlpNetsParams()
         self.custom_metric = StereoPvn3dMetrics()
+        self.initial_pose_model = _InitialPoseModel()
         self.segmentation_metric = tf.keras.metrics.CategoricalCrossentropy(from_logits=True)
-        '''From stereonet: '''
         self.base_channels = base_channels
+        self.resnet_lr = self.build_resnet(self.channel_multiplier, self.base_channels, self.resnet_input_shape)
+
         _, _, f12, f13, f14, f15 = [
             x * self.channel_multiplier * 2 for x in self.base_channels
         ]
+
         _, _, f22, f23, f24, f25 = [
             x * 4 * self.channel_multiplier * 2 for x in self.base_channels
         ]
@@ -196,37 +152,72 @@ class StereoPvn3d(keras.Model):
         )
         self.cal1 = ContextAdj(filter=32)
         self.cal2 = ContextAdj(filter=64)
-        '''End'''
 
 
         # MLP model 
         self.mlp_net = MlpNets(self.mlp_params,
                                num_pts= self.num_pts,
                                num_kpts= self.num_kpts,
-                               num_cls= self.num_cls+1,
+                               num_cls= self.num_cls,
                                num_cpts= self.num_cpts,
                                channel_xyz= self.dim_xyz)
 
         self.mlp_model = self.mlp_net.build_mlp_model(rgbd_features_shape=(self.num_pts, self.n_rgbd_mlp_feats))
-        [H, W, _] = rgb_shape
+        [H, W, _] = resnet_input_shape
 
 
-    @tf.function
+    #@tf.function
     def call(self, inputs, training=None):
-        # depth with dummy backbone:
-        x_l = inputs[0]
-        x_r = inputs[1]  # another layer
+        full_rgb_l = inputs[0]
+        full_rgb_r = inputs[1]  # another layer        
+        h, w = tf.shape(full_rgb_l)[1], tf.shape(full_rgb_r)[2]
+
         baseline = inputs[2][0]
         K = inputs[3][0]
         # print('K', K)
         focal_length = K[0,0]
         # print('focal_length', focal_length)
-        sampled_index = inputs[4]
-        gt_depth = inputs[5]
+        intrinsics = inputs[3]
+        sampled_inds_in_roi = inputs[4]
+        depth = inputs[5]
+        bbox = inputs[6]
+        mesh_kpts = inputs[7]
+
+        norm_bbox = tf.cast(bbox / [h, w, h, w], tf.float32)
+        cropped_rgbs_l = tf.image.crop_and_resize(
+            tf.cast(full_rgb_l, tf.float32),
+            norm_bbox,
+            tf.range(tf.shape(full_rgb_l)[0]),
+            self.resnet_input_shape[:2],
+        )
+
+        cropped_rgbs_r = tf.image.crop_and_resize(
+            tf.cast(full_rgb_r, tf.float32),
+            norm_bbox,
+            tf.range(tf.shape(full_rgb_r)[0]),
+            self.resnet_input_shape[:2],
+        )
+
+        cropped_depth = tf.image.crop_and_resize(
+            tf.cast(depth, tf.float32),
+            norm_bbox,
+            tf.range(tf.shape(depth)[0]),
+            self.resnet_input_shape[:2],
+        )
+
+        # stop gradients for preprocessing
+        # cropped_rgbs_l = tf.stop_gradient(cropped_rgbs_l)
+        # cropped_rgbs_r = tf.stop_gradient(cropped_rgbs_r)
+        # cropped_depth = tf.stop_gradient(cropped_depth)
+        # norm_bbox = tf.stop_gradient(norm_bbox)
+
+        #sampled_inds_in_roi = tf.stop_gradient(sampled_inds_in_roi)
+
+
 
         # StereoNet ouputs is of dimensions HxWx1032
-        f_l_1, f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(x_l)
-        f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(x_r)
+        f_l_1, f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(cropped_rgbs_l)
+        f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
 
         deep = True
         # x, w, w_1 = self.attention1(f_l_5, f_r_5)
@@ -324,6 +315,7 @@ class StereoPvn3d(keras.Model):
         x = self.bn(x)
         x = self.leaky_relu(x)
         stereo_outputs = self.head2(x)
+        #print(f"stereo_outputs.shape: {stereo_outputs.shape} - stereo_outputs: {stereo_outputs}")
 
         # if debug:
         #    if self.context_adjustment:
@@ -357,6 +349,7 @@ class StereoPvn3d(keras.Model):
             else:
                 depth = stereo_outputs[..., :1]
                 
+        #print(f"stereo_outputs.shape: {stereo_outputs.shape} - stereo_outputs: {stereo_outputs}")
 
         
 
@@ -365,35 +358,50 @@ class StereoPvn3d(keras.Model):
         # rgb_emb = match_choose_adp(self.n_rgbd_feats, sampled_index, crop_factor, stereo_outputs.shape)
         #print('Before match_choose ...')
         # rgb_emb = match_choose(self.n_rgbd_feats, sampled_index)
-        rgb_emb = match_choose(stereo_outputs, sampled_index)
+
+        #print(f"sampled_inds_in_roi.shape: {sampled_inds_in_roi.shape}")
+
+        rgb_emb = tf.gather_nd(stereo_outputs, sampled_inds_in_roi)
+        #rgb_emb = match_choose(stereo_outputs, sampled_inds_in_roi)
+
+        #print(f"rgb_emb.shape: {rgb_emb.shape} - rgb_emb: {rgb_emb}")
+
         #print('rgb_emb after match_choose', rgb_emb)
         camera_scale = 1
         feats_fused = rgb_emb
         kp, sm, cp = self.mlp_model(feats_fused, training=training)
+        if training:
+            return (depth, kp, sm, cp, norm_bbox)
+        else:
+            xyz,  = pcld_processor_tf_batched_by_index(depth, intrinsics, self.num_pts, sampled_inds_in_roi)
+            batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz, kp, cp, sm, mesh_kpts])
+            return (
+                batch_R,
+                batch_t,
+                voted_kpts,
+                (depth, kp, sm, cp, norm_bbox)
+            )
 
+    # @tf.function
+    # def train_step(self, data):
+    #     # Unpack the data. Its structure depends on your model and
+    #     # on what you pass to `fit()`.
+    #     x = data[0]
+    #     y = data[1]
+    #     batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
+    #     with tf.GradientTape() as tape:
+    #         y_pred = self(x, training=True)  # Forward pass
+    #         # Compute the loss value
+    #         # (the loss function is configured in `compile()`)
+    #         loss= self.loss(y_true=y, y_pred=y_pred) # / batch_size
 
-        return [depth, kp, sm, cp]
+    #     # Compute gradients
+    #     trainable_vars = self.trainable_variables
+    #     gradients = tape.gradient(loss, trainable_vars)
+    #     # Update weights
+    #     self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-    @tf.function
-    def train_step(self, data):
-        # Unpack the data. Its structure depends on your model and
-        # on what you pass to `fit()`.
-        x = data[0]
-        y = data[1]
-        batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
-        with tf.GradientTape() as tape:
-            y_pred = self(x, training=True)  # Forward pass
-            # Compute the loss value
-            # (the loss function is configured in `compile()`)
-            loss= self.loss(y_true=y, y_pred=y_pred) # / batch_size
-
-        # Compute gradients
-        trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
-        # Update weights
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-
-        return {'loss': loss}#, 'ssim_loss': ssim_loss}
+    #     return {'loss': loss}#, 'ssim_loss': ssim_loss}
 
     def compute_errors(gt, pred):
         """Computation of error metrics between predicted and ground truth depths
@@ -414,7 +422,7 @@ class StereoPvn3d(keras.Model):
         return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
 
 
-    @tf.function
+    #@tf.function
     def test_step(self, data):
         print(f"data: {data}")
 
@@ -625,3 +633,97 @@ class StereoPvn3d(keras.Model):
         y2_new = tf.where(y2_new > in_h, in_h, y2_new)
 
         return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor
+
+
+    @staticmethod
+    def transform_indices_from_full_image_cropped(
+        sampled_inds_in_original_image, bbox, crop_factor
+    ):
+        """Transforms indices from full image to croppend and rescaled images.
+        Original indices [b, h, w, 3] with the last dimensions as indices into [b, h, w]
+        are transformed and have same shape [b,h,w,3], however the indices now index
+        into the cropped and rescaled images according to the bbox and crop_factor
+
+        To be used with tf.gather_nd
+        Since the first index refers to the batch, no batch_dims is needed
+
+        Examples:
+            Index: [500,500] with bounding box [500,500,...] is transform to [0,0]
+            index [2, 2] with bounding box [0, 0] and crop_factor 2 is transformed to [1,1]
+
+
+        Args:
+            sampled_inds_in_original_image (b,h,w,3): Indices into the original image
+            bbox (b,4): Region of Interest in the image (y1,x1,y2,x2)
+            crop_factor (b,): Integer crop factor
+
+        Returns:
+            sampled_inds_in_roi (b,h,w,3): Indices into the cropped and rescaled image
+        """
+        b = tf.shape(sampled_inds_in_original_image)[0]
+
+        # sampled_inds_in_original_image: [b, num_points, 3]
+        # with last dimension is index into [b, h, w]
+        # crop_factor: [b, ]
+
+        crop_top_left = tf.concat((tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1)  # [b, 3]
+
+        sampled_inds_in_roi = sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
+
+        # apply scaling to indices, BUT ONLY H AND W INDICES (and not batch index)
+        crop_factor_bhw = tf.concat(
+            (
+                tf.ones((b, 1), dtype=tf.int32),
+                crop_factor[:, tf.newaxis],
+                crop_factor[:, tf.newaxis],
+            ),
+            -1,
+        )  # [b, 3]
+        sampled_inds_in_roi = sampled_inds_in_roi / crop_factor_bhw[:, tf.newaxis, :]
+
+        return tf.cast(sampled_inds_in_roi, tf.int32)
+    
+    def build_resnet(self, channel_multiplier, base_channels, resnet_input_shape, deep=False, name="resnet"):
+        f10, f11, f12, f13, f14, f15 = [x * channel_multiplier for x in base_channels]
+        f20, f21, f22, f23, f24, f25 = [x * 4 * channel_multiplier for x in base_channels]
+        input = Input(shape=resnet_input_shape, name="rgb")
+        # write all the code with layers
+        x = ResInitial(filters=(f10, f20), name=f"{name}_initial")(input)
+        if deep:
+            x = ResIdentity(filters=(f10, f20), name=f"{name}_1_1")(x)
+        x_1 = x
+        x = ResConv(s=2, filters=(f11, f21), name=f"{name}_1_2")(x)
+        if deep:
+            x = ResIdentity(filters=(f11, f21), name=f"{name}_2_1")(x)
+            x = ResIdentity(filters=(f11, f21), name=f"{name}_2_2")(x)
+        x_2 = x
+        x = ResConv(s=2, filters=(f12, f22), name=f"{name}_2_3")(x)
+        # 3rd stage
+        if deep:
+            x = ResIdentity(filters=(f12, f22), name=f"{name}_3_1")(x)
+            x = ResIdentity(filters=(f12, f22), name=f"{name}_3_2")(x)
+        x = ResIdentity(filters=(f12, f22), name=f"{name}_3_3")(x)
+        x_3 = x
+        x = ResConv(s=2, filters=(f13, f23), name=f"{name}_3_4")(x)
+        # 4th stage
+        if deep:
+            x = ResIdentity(filters=(f13, f23), name=f"{name}_4_1")(x)
+            x = ResIdentity(filters=(f13, f23), name=f"{name}_4_2")(x)
+            x = ResIdentity(filters=(f13, f23), name=f"{name}_4_3")(x)
+        x = ResIdentity(filters=(f13, f23), name=f"{name}_4_4")(x)
+        x_4 = x
+        x = ResConv(s=2, filters=(f14, f24), name=f"{name}_4_5")(x)
+        # 5th stage
+        if deep:
+            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_1")(x)
+            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_2")(x)
+            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_3")(x)
+            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_4")(x)
+        x = ResIdentity(filters=(f14, f24), name=f"{name}_5_5")(x)
+        x_5 = x
+
+        output = [x_1, x_2, x_3, x_4, x_5]
+        model = keras.Model(inputs=input, outputs=output, name="resnet_model")
+
+        return model
+

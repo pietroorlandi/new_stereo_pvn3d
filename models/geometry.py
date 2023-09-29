@@ -108,7 +108,7 @@ def pts_clustering_with_std(pts, sigma=tf.constant(1.0)):
     return filtered_mean_xyz, pts_mask
 
 
-@tf.function
+#@tf.function
 def batch_pts_clustering_with_std(kps_cans, sigma=1):
     """
     filtering the points with the standard derivation in batch
@@ -137,7 +137,7 @@ def batch_pts_clustering_with_std(kps_cans, sigma=1):
     )  # [bs, n_kp_cp_, 3]
     return new_mean
 
-@tf.function
+#@tf.function
 def batch_pts_clustering_with_std_pietro(kps_cans, sigma=1):
     """
     filtering the points with the standard derivation in batch
@@ -168,7 +168,7 @@ def batch_pts_clustering_with_std_pietro(kps_cans, sigma=1):
     return new_mean
 
 
-@tf.function
+#@tf.function
 def rt_svd_transform(A, B):
     """
     Calculates the svd transform that maps corresponding points A to B in m spatial dimensions not in batch
@@ -231,7 +231,7 @@ def rt_svd_transform(A, B):
     return R, t
 
 
-@tf.function
+#@tf.function
 def rt_svd_transform_fast(A, B):
     """
     Calculates the svd transform that maps corresponding points A to B in m spatial dimensions not in batch
@@ -285,7 +285,7 @@ def rt_svd_transform_fast(A, B):
     return R, t
 
 
-@tf.function
+#@tf.function
 def batch_rt_svd_transform(A, B, weights_vector):
     """
     Calculates the svd transform that maps corresponding points A to B in m spatial dimensions in batch
@@ -426,7 +426,7 @@ def get_Rt_unity(cam_r, cam_p, obj_r, obj_p):
     return RT_O_C
 
 
-@tf.function
+#@tf.function
 def get_pt_candidates_tf(
     pcld_xyz, kpts_ofst_pre, seg_pre, ctr_ofst_pre, ratio=tf.constant(0.2)
 ):
@@ -482,7 +482,7 @@ def get_pt_candidates_tf(
     return kpts_cpts_can_
 
 
-@tf.function
+#@tf.function
 def batch_get_pt_candidates_tf(pcld_xyz, kpts_ofst_pre, seg_pre, ctr_ofst_pre, k=10):
     # currently k=10 is working pretty good
     """
@@ -669,7 +669,7 @@ def icp_refinement(initial_pose, source, target, distance_threshold):
     return Rt_refined[:3]
 
 
-@tf.function
+#@tf.function
 def one_step_svd(R, t, A, B):
     n_xyz_pcld, c = B.shape
     n_xyz_mesh, c = A.shape
@@ -691,7 +691,7 @@ def one_step_svd(R, t, A, B):
     return R_svd, t_svd
 
 
-@tf.function
+#@tf.function
 def batch_one_step_svd(R, t, A, B, weights_vector):
     """
     :param R: a batch of rotation, bs, 3, 3
@@ -723,7 +723,7 @@ def batch_one_step_svd(R, t, A, B, weights_vector):
     return batch_R_svd, batch_t_svd
 
 
-@tf.function
+#@tf.function
 def tf_icp(initial_R, initial_t, A, B, iters=3):
     """
     :param iters: iteration times for refinement
@@ -742,7 +742,7 @@ def tf_icp(initial_R, initial_t, A, B, iters=3):
     return R, t
 
 
-@tf.function
+#@tf.function
 def batch_tf_icp(batch_R, batch_t, A, B, k, weights_vector):
     """
     :param weights_vector:
@@ -810,7 +810,7 @@ def batch_tf_icp(batch_R, batch_t, A, B, k, weights_vector):
     return R, t, min_index
 
 
-@tf.function
+#@tf.function
 def batch_tf_icp_2(batch_R, batch_t, A, B, weights_vector):
     """
     :param weights_vector:
@@ -870,7 +870,7 @@ def batch_tf_icp_2(batch_R, batch_t, A, B, weights_vector):
     return R, t
 
 
-@tf.function()
+#@tf.function()
 def get_Rt_varying_matrices2(
     R_top,
     t_top,
@@ -1012,7 +1012,7 @@ def get_Rt_varying_matrices2(
     return variation_R, variation_t
 
 
-@tf.function()
+#@tf.function()
 def get_Rt_varying_matrices(
     R_top,
     t_top,
@@ -1173,7 +1173,7 @@ def get_Rt_varying_matrices(
     return variation_R, variation_t
 
 
-@tf.function()  # order
+#@tf.function()  # order
 def get_Rt_varying_matrices_top(
     R_top,
     t_top,

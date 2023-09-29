@@ -35,6 +35,7 @@ def l1_loss(pred_ofst, targ_ofst, mask_labels):
 class StereoPvn3dLoss(tf.keras.losses.Loss):
     def __init__(
         self,
+        resnet_input_shape,
         mse_loss_discount,
         l1_loss_discount,
         ssim_loss_discount,
@@ -54,6 +55,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         **kwargs
     ):
         super().__init__()
+        self.resnet_input_shape = resnet_input_shape
         self.mse_loss_discount = mse_loss_discount
         self.l1_loss_discount = l1_loss_discount
         self.ssim_loss_discount = ssim_loss_discount
@@ -72,9 +74,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         self.distribute_training = distribute_training
         self.seg_from_logits = True
         self.reduction = tf.keras.losses.Reduction.NONE if self.distribute_training else tf.keras.losses.Reduction.AUTO
-        self.CategoricalCrossentropy = \
-            tf.keras.losses.CategoricalCrossentropy(from_logits=self.seg_from_logits, reduction=self.reduction)
-
+        self.BinaryFocalLoss = focal_loss.BinaryFocalLoss(gamma=2, from_logits=True)
 
         red = tf.keras.losses.Reduction.NONE
 
@@ -165,10 +165,26 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
 
         # data: rgb, rgb_R, self.baseline, self.intrinsic_matrix, sampled_index
         # model_output: depth, kp, sm, cp
-        [gt_depth, gt_sm, gt_kp, gt_cp, mask_label, pnt_cld, ctr, kpts] = y_true_list
-        [pred_depth, pred_kp, pred_sm, pred_cp] = y_pred_list
+        [gt_depth, gt_kp, gt_cp, mask_label, pnt_cld] = y_true_list
+        # change in [gt_depth, gt_kp, gt_cp, mask_label, pnt_cld] = y_true_list
+        [pred_depth, pred_kp, pred_sm, pred_cp, norm_bbox] = y_pred_list
+
+        print("Loss shapes")
+        print(f"depth: gt_depth.shape: {gt_depth.shape} - pred_depth.shape: {pred_depth.shape}")
+        print(f"kp: gt_kp.shape: {gt_kp.shape} - pred_kp.shape: {pred_kp.shape}")
+        print(f"cp: gt_cp.shape: {gt_cp.shape} - pred_cp: {pred_cp.shape}")
+        print(f"seg: mask_label.shape: {mask_label.shape} - pred_sm: {pred_sm.shape}")
+
+
         gt_depth = gt_depth[..., :1]
         pred_depth = pred_depth[..., :1]
+
+        gt_depth = tf.image.crop_and_resize(
+            tf.cast(gt_depth, tf.float32),
+            norm_bbox,
+            tf.range(tf.shape(gt_depth)[0]),
+            self.resnet_input_shape[:2]
+        )
         # print('gt_depth', gt_depth)
         # print('pred_depth', pred_depth)
         
@@ -199,7 +215,16 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         #     label = tf.argmax(label, axis=2)
         #     loss_seg = self.BinaryFocalLoss(label, seg_pre)  # return batch-wise value
         # else:
-        loss_seg = self.CategoricalCrossentropy(gt_sm, pred_sm)  # labels [bs, n_pts, n_cls] this is from logits
+        print(f"seg: mask_label.shape: {mask_label.shape} - pred_sm: {pred_sm.shape}")
+        print(f"seg: mask_label[:,:,0].shape: {mask_label[:,:,0].shape} - pred_sm[:,:,0]: {pred_sm[:,:,0].shape}")
+        print(f"seg: mask_label[:,:,0].dtype: {mask_label[:,:,0].dtype} - pred_sm[:,:,0]: {pred_sm[:,:,0].dtype}")
+        mask_label = tf.cast(mask_label, dtype=tf.float32)
+        pred_sm = tf.cast(pred_sm, dtype=tf.float32)
+
+
+        loss_seg = self.BinaryFocalLoss(mask_label, pred_sm)  # labels [bs, n_pts, n_cls] this is from logits
+        # change in something similiar: tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False, reduction=self.reduction)
+
 
         loss_cp = self.l1_loss(pred_ofst=pred_cp,
                                targ_ofst=gt_cp,
@@ -230,7 +255,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         
 
         loss = (
-            mse_loss_scaled
+             mse_loss_scaled
             + mlse_loss_scaled
             + ssim_loss_scaled
             + loss_cp_scaled # from pvn3d

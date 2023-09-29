@@ -23,7 +23,7 @@ class PvnLoss:
         self.BinaryFocalLoss = focal_loss.BinaryFocalLoss(gamma=2, from_logits=True)
         self.CategoricalCrossentropy = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
 
-    @tf.function
+    #@tf.function
     def call(self, y_true, y_pred):
         rt, mask = y_true[0], y_true[1]
 

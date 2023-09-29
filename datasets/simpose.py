@@ -151,10 +151,14 @@ class _6IMPOSE(_Dataset):
 
             print("USING CACHE FROM ", cache_path)
 
+
             def arrange_as_xy_tuple(d):
-                return (d["rgb"], d["depth"], d["intrinsics"], d["roi"], d["mesh_kpts"]), (
-                    d["RT"],
-                    d["mask"],
+                return (d["rgb"], d["rgb_R"], d["baseline"], d["intrinsics"], d["sampled_inds_in_roi"], d["depth"], d["new_bbox"], d["mesh_kpts"]), (
+                    d["depth"],
+                    d["kp_offsets"],
+                    d["cp_offsets"],
+                    d["mask_selected"],
+                    d['xyz']
                 )
 
             return (
@@ -164,8 +168,146 @@ class _6IMPOSE(_Dataset):
             )
 
         raise NotImplementedError
-
+    
     def visualize_example(self, example):
+        color_depth = lambda x: cv2.applyColorMap(
+            cv2.convertScaleAbs(x, alpha=255 / 2), cv2.COLORMAP_JET
+        )
+
+        rgb = example["rgb"]
+        rgb_R = example["rgb_R"]
+        depth = example["depth"]
+        xyz = example["xyz"]
+        
+        bbox = example["new_bbox"]
+        sampled_inds_in_roi = example["sampled_inds_in_roi"]
+        kp_offsets = example["kp_offsets"]
+        cp_offsets = example["cp_offsets"]
+        mask_selected = example["mask_selected"]
+        intrinsics = example["intrinsics"].astype(np.float32)
+        bboxes = example["roi"]
+        kpts = example["mesh_kpts"]
+        # From unbatched to batched
+        xyz = tf.expand_dims(xyz, axis=0)
+        bbox = tf.expand_dims(bbox, axis=0)
+        RT = example["RT"]
+        mask = example["mask"]
+
+        (
+            y1,
+            x1,
+            y2,
+            x2,
+        ) = bboxes[:4]
+        out_rgb = cv2.rectangle(rgb.copy(), (x1, y1), (x2, y2), (0, 255, 0), 2)
+        rvec = cv2.Rodrigues(RT[:3, :3])[0]
+        tvec = RT[:3, 3]
+        cv2.drawFrameAxes(out_rgb, intrinsics, np.zeros((4,)), rvec=rvec, tvec=tvec, length=0.1)
+
+        c1, c2 = st.columns(2)
+        c1.image(out_rgb, caption=f"RGB_L {rgb.shape} ({rgb.dtype})")
+        c1.image(
+            color_depth(depth),
+            caption=f"Depth {depth.shape} ({depth.dtype})",
+        )
+        c1.image(mask * 255, caption=f"Mask {mask.shape} ({mask.dtype})")
+
+        c2.write(intrinsics)
+        c2.write(kpts)
+        c2.write(RT)
+
+        from losses.pvn_loss import PvnLoss
+        from models.stereopvn3d import StereoPvn3d
+
+        #num_samples = st.select_slider("num_samples", [2**i for i in range(5, 13)])
+        num_samples = self.n_sample_points
+        margin = st.slider("margin", 0, 200, 0, step=50)
+
+        h, w = rgb.shape[:2]
+
+        kp_offsets = tf.expand_dims(kp_offsets, axis=0)
+        cp_offsets = tf.expand_dims(cp_offsets, axis=0)
+        print(f"kp_offsets.shape: {kp_offsets.shape} - cp_offsets.shape: {cp_offsets.shape}")
+        all_offsets = np.concatenate([kp_offsets, cp_offsets], axis=-2)  # [b, n_pts, 9, 3]
+
+        offset_views = {}
+        cam_cx, cam_cy = intrinsics[0, 2], intrinsics[1, 2]  # [b]
+        cam_fx, cam_fy = intrinsics[0, 0], intrinsics[1, 1]  # [b]
+
+        def to_image(pts):
+            coors = (
+                pts[..., :2] / pts[..., 2:] * tf.stack([cam_fx, cam_fy], axis=0)[tf.newaxis, :]
+                + tf.stack([cam_cx, cam_cy], axis=0)[tf.newaxis, :]
+            )
+            coors = tf.floor(coors)
+            return tf.concat([coors, pts[..., 2:]], axis=-1).numpy()
+
+        projected_keypoints = self.mesh_kpts @ RT[:3, :3].T + RT[:3, 3]
+        projected_keypoints = to_image(projected_keypoints)
+
+        # for each pcd point add the offset
+        keypoints_from_pcd = xyz[:, :, None, :].numpy() + all_offsets  # [b, n_pts, 9, 3]
+        keypoints_from_pcd = to_image(keypoints_from_pcd.astype(np.float32))
+        projected_pcd = to_image(xyz)  # [b, n_pts, 3]
+
+        for i in range(9):
+            # offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            offset_view = rgb.copy() // 3
+
+            # get color hue from offset
+            hue = np.arctan2(all_offsets[0, :, i, 1], all_offsets[0, :, i, 0]) / np.pi
+            hue = (hue + 1) / 2
+            hue = (hue * 180).astype(np.uint8)
+            # value = np.ones_like(hue) * 255
+            value = (np.linalg.norm(all_offsets[0, :, i, :], axis=-1) / 0.1 * 255).astype(np.uint8)
+            hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
+            colored_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)
+
+            sorted_inds = np.argsort(np.linalg.norm(all_offsets[0, :, i, :], axis=-1), axis=-1)[
+                ::-1
+            ]
+            keypoints_from_pcd[0, :, i, :] = keypoints_from_pcd[0, sorted_inds, i, :]
+            colored_offset[0] = colored_offset[0, sorted_inds, :]
+            sorted_xyz = projected_pcd[0, sorted_inds, :]
+            for start, target, color in zip(
+                sorted_xyz, keypoints_from_pcd[0, :, i, :], colored_offset[0]
+            ):
+                # over all pcd points
+                cv2.line(
+                    offset_view,
+                    tuple(map(int, start[:2])),
+                    tuple(map(int, target[:2])),
+                    tuple(map(int, color)),
+                    1,
+                )
+
+            # # mark correct keypoint
+            cv2.drawMarker(
+                offset_view,
+                (int(projected_keypoints[i, 0]), int(projected_keypoints[i, 1])),
+                (0, 255, 0),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=20,
+                thickness=1,
+            )
+
+            h, w = offset_view.shape[:2]
+            y1, x1, y2, x2 = bbox[0]
+            x1 = np.clip(x1 - margin, 0, w)
+            x2 = np.clip(x2 + margin, 0, w)
+            y1 = np.clip(y1 - margin, 0, h)
+            y2 = np.clip(y2 + margin, 0, h)
+            offset_view = offset_view[y1:y2, x1:x2]
+            name = f"Keypoint {i}" if i < 8 else "Center"
+            offset_views.update({name: offset_view})
+
+        cols = it.cycle(st.columns(3))
+
+        for col, (name, offset_view) in zip(cols, offset_views.items()):
+            col.image(offset_view, caption=name)
+
+
+    def visualize_example_original(self, example):
         color_depth = lambda x: cv2.applyColorMap(
             cv2.convertScaleAbs(x, alpha=255 / 2), cv2.COLORMAP_JET
         )
@@ -349,6 +491,7 @@ class _6IMPOSE(_Dataset):
             shot = json.load(f)
 
         intrinsics = np.array(shot["cam_matrix"])
+        baseline = np.array(shot["stereo_baseline"])
 
         cam_quat = shot["cam_rotation"]
         cam_rot = R.from_quat(cam_quat)
@@ -392,6 +535,10 @@ class _6IMPOSE(_Dataset):
         bbox = np.array((bbox[1], bbox[0], bbox[3], bbox[2]))  # change order to y1,x1,y2,x2
         mask = np.where(mask_visib == instance_id, 1, 0)
 
+        if self.add_bbox_noise:
+            bbox += np.random.randint(-self.bbox_noise, self.bbox_noise, size=bbox.shape)
+        
+
         if self.if_pose:
             #RT_list = self.get_RT_list(i)
             #print(f"RT_list: {RT_list}")
@@ -399,51 +546,49 @@ class _6IMPOSE(_Dataset):
             #pcld_xyz, pcld_index = dpt_2_cld_with_roi(depth, roi, self.cam_scale, self.intrinsic_matrix, [0, 0])
             #print(f"Point cloud calcolata in blender.py: {pcld_xyz} - max {pcld_xyz.max()}")
             h, w = rgb.shape[:2]
-            _bbox, _crop_factor = StereoPvn3d.get_crop_index(
-                bbox[None], h, w, 160, 160
+            b_new_bbox, _crop_factor = StereoPvn3d.get_crop_index(
+                bbox[None], h, w, 480, 640
             )
-            print(f"_bbox")
+            print(f"bbox[None]: {bbox[None]}")
+            print(f"b_new_bbox: {b_new_bbox}")
+            print(f"instance_id: {instance_id}")
 
-            xyz, feats, pcld_index = StereoPvn3d.pcld_processor_tf(
+            b_xyz, feats, sampled_inds_in_original_image = StereoPvn3d.pcld_processor_tf(
                 (rgb[None] / 255.0).astype(np.float32),
                 depth[None].astype(np.float32),
                 intrinsics[None].astype(np.float32),
-                _bbox,
+                b_new_bbox,
                 self.n_sample_points,
             )
-            print(f"xyz point cloud shape: {xyz.shape} - xyz point cloud: {xyz}")
-            pcld_rgb = get_pcld_rgb(rgb, pcld_index)
-            print(f"pcld_index : {pcld_index} - max: {tf.math.reduce_max(pcld_index)} - min: {tf.math.reduce_min(pcld_index)} - mean: {tf.math.reduce_mean(pcld_index)}")
+            print(f"type(xyz): {type(b_xyz)} - shape: {b_xyz.shape} - dtype: {b_xyz.dtype}")
+            b_sampled_inds_in_roi = StereoPvn3d.transform_indices_from_full_image_cropped(
+                sampled_inds_in_original_image,
+                b_new_bbox,
+                _crop_factor
+            )
 
-            # index_chosen = self.choose_index(pcld_index)
-            # pcld_xyz_rgb = np.concatenate((pcld_xyz, pcld_rgb), axis=1)[index_chosen, :] 
+            mask_selected = tf.gather_nd(mask[None], sampled_inds_in_original_image) # maybe use sampled_inds_in_original_image
+            print(f"mask_selected.shape after gather_nd {mask_selected.shape}")
+            b_mask_selected = tf.expand_dims(mask_selected, axis=-1)
+            b_kp_offsets, b_cp_offsets = PvnLoss.get_offst(
+                RT[None].astype(np.float32),
+                b_xyz,
+                b_mask_selected,
+                self.mesh_kpts[None].astype(np.float32),
+            )
+            print(f"kp_offsets.shape before: {b_kp_offsets.shape}")
+            print(f"cp_offsets.shape before: {b_cp_offsets.shape}")
 
-            #pcld_xyz_rgb_nm = pcld_xyz_rgb # originally defined in the previous comments
+            # unbatch b_kp_offsets, b_cp_offsets, b_mask_selected, b_sampled_inds_in_roi 
+            kp_offsets = tf.squeeze(b_kp_offsets, axis=0).numpy()
+            cp_offsets = tf.squeeze(b_cp_offsets, axis=0).numpy()
+            mask_selected = tf.squeeze(b_mask_selected, axis=0).numpy()
+            sampled_inds_in_roi = tf.squeeze(b_sampled_inds_in_roi, axis=0).numpy()
+            xyz = tf.squeeze(b_xyz, axis=0).numpy()
+            new_bbox = tf.squeeze(b_new_bbox, axis=0).numpy()
 
-            #sampled_index = pcld_index[index_chosen]
-            # print('sampled_idx shape', tf.shape(sampled_index))
-            #label_list, mask_selected = self.get_label_list(mask, sampled_index)
-            # print('label_list', tf.shape(label_list))
-            #mask_label = (mask_selected > 0).astype('uint8')
-            #print(f"Mask selected: {mask_selected} - shape: {mask_selected.shape} - dtype: {mask_selected.dtype}")
-            #print(f"mask_label: {mask_label} - shape: {mask_label.shape}")
-            # print('mask_label shape', tf.shape(mask_label))
-            # get kp_targ_ofst ct_targ_ofst
-            #ctr_targ_ofst, kp_targ_ofst, kpts, ctr = self.get_offst(RT_list, pcld_xyz_rgb_nm[:, :3], mask_selected)
-
-            # print('ctr_targ_offset shape', tf.shape(ctr_targ_ofst))
-            # print('kpt_targ_offset shape', tf.shape(kp_targ_ofst))
-            #print(f"ctr_targ_ofst[250:260] {ctr_targ_ofst[250:260]}")
-            #print(f"kp_targ_ofst[250:260] {kp_targ_ofst[250:260]}")
-            #count_zeros = tf.reduce_sum(tf.cast(tf.reduce_all(ctr_targ_ofst == 0, axis=-1), tf.int32))
-            #print("Number of points with [0, 0, 0]:", count_zeros.numpy())
-            # print('-----------------------------------------------------------------')
-
-
-
-        if self.add_bbox_noise:
-            bbox += np.random.randint(-self.bbox_noise, self.bbox_noise, size=bbox.shape)
-        
+        print(f"kp_offsets.shape after: {kp_offsets.shape}")
+        print(f"cp_offsets.shape after: {cp_offsets.shape}")
         #ctr_targ_ofst, kp_targ_ofst, kpts, ctr = self.get_offst(RT, pcld_xyz_rgb_nm[:, :3], mask_selected)
         
         # kp_offsets, cp_offsets = PvnLoss.get_offst(
@@ -454,23 +599,42 @@ class _6IMPOSE(_Dataset):
         # )
 
 
+        # out = (rgb, rgb_R, self.baseline, self.intrinsic_matrix, sampled_index, depth), (depth, label_list, kp_targ_ofst, ctr_targ_ofst, mask_label, pcld_xyz[index_chosen, :], ctr, kpts)
+
+        # TODO: metti i cp_offset e kp_offset e tutta la roba nel return e mettilo anche nel metodo to_tf_dataset
+        #       cambia visualize_example prendendo i valori da input
+        
 
         print(f"__getitem__")
         print(f"rgb.shape: {rgb.shape}")
+        print(f"rgb_R.shape: {rgb_R.shape}")
+        print(f"sampled_inds_in_roi.shape: {sampled_inds_in_roi.shape}")
+        print(f"kp_offsets.shape: {kp_offsets.shape}")
+        print(f"cp_offsets.shape: {cp_offsets.shape}")        
         print(f"depth.shape: {depth.shape}")
         print(f"intrinsics: {intrinsics}")
         print(f"roi.shape: {bbox.shape}")
         print(f"mask.shape: {mask.shape}")
+        print(f"mask_selected.shape: {mask_selected.shape} - dtype: {mask_selected.dtype}")
         print(f"mesh_kpts.shape: {self.mesh_kpts.shape}")
 
         return {
             "rgb": rgb.astype(np.uint8),
-            "depth": depth.astype(np.float32),
+            "rgb_R": rgb_R.astype(np.uint8),
             "intrinsics": intrinsics.astype(np.float32),
+            "baseline": baseline.astype(np.float32),
+            "depth": depth.astype(np.float32),
+            "sampled_inds_in_roi": sampled_inds_in_roi.astype(np.int32),
+            "xyz": xyz.astype(np.float32),
+            "new_bbox": new_bbox.astype(np.int32),
+            "sampled_inds_in_original_image": sampled_inds_in_original_image.numpy().astype(np.int32),
             "roi": bbox.astype(np.int32),
             "RT": RT.astype(np.float32),
             "mask": mask.astype(np.uint8),
             "mesh_kpts": self.mesh_kpts.astype(np.float32),
+            "kp_offsets": kp_offsets.astype(np.float32),
+            "cp_offsets": cp_offsets.astype(np.float32),
+            "mask_selected": mask_selected.astype(np.int32),
         }
 
     def get_rgb(self, index) -> np.ndarray:
@@ -500,7 +664,8 @@ class _6IMPOSE(_Dataset):
         depth_mask = depth < 5  # in meters, we filter out the background( > 5m)
         depth = depth * depth_mask
         return depth
-
+    
+ 
     def get_label_list(self, mask, sampled_index):
 
         """
@@ -534,6 +699,27 @@ class _6IMPOSE(_Dataset):
                 label_list.append(label)
 
         return label_list, mask_selected
+    
+
+    def choose_index(self, pcld_index):
+        """
+        pcld_index: an array: 1 X N
+        """
+        print(f"len(pcld_index: {len(pcld_index)})")
+        if len(pcld_index) < 400:
+            return None
+
+        pcld_index_id = np.array([i for i in range(len(pcld_index))])
+
+        if len(pcld_index_id) > self.n_sample_points:
+            c_mask = np.zeros(len(pcld_index_id), dtype=int)
+            c_mask[:self.n_sample_points] = 1
+            np.random.shuffle(c_mask)
+            pcld_index_id = pcld_index_id[c_mask.nonzero()]
+        else:
+            pcld_index_id = np.pad(pcld_index_id, (0, self.n_sample_points - len(pcld_index_id)), "wrap")
+
+        return pcld_index_id
 
 
 class Train6IMPOSE(_6IMPOSE):

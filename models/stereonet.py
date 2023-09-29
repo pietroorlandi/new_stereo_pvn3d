@@ -18,7 +18,6 @@ from tensorflow.keras import Input
 from tensorflow.keras.layers import Conv2D
 from .stereo_layers import (
     ResInitial,
-    Prova,
     ResUp,
     ResConv,
     ResReduce,

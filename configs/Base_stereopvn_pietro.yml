@@ -1,6 +1,6 @@
 epochs: 60
 dataset: 6IMPOSE
-num_validate: 15
+num_validate: 4
 #weights: "checkpoints/TrainE2E/model_32" # this is trained on multi
 #weights: "checkpoints/cpsduck (continued)/model_*"
 #weights: "checkpoints/lm_cam (continued)/model_*"
@@ -8,12 +8,13 @@ num_validate: 15
 
 
 shared: &shared
+  cutoff: 5
   cls_type: cpsduck
   root: "/home/porlandi/Documents/Dataset"
-  batch_size: 4
-  use_cache: False
+  batch_size: 2
+  use_cache: True
   bbox_noise: 20 # shift by how many pixels
-  n_objects_per_image: 20
+  n_objects_per_image: 5
   if_pose: true
 
 
@@ -36,7 +37,7 @@ Adam:
   learning_rate: 0.0005
 
 StereoPvn3d:
-  rgb_shape : [640, 480, 3]
+  resnet_input_shape : [240, 320, 3]
   use_disparity: true
   relative_disparity: false
   channel_multiplier: 4 # original: 4
@@ -49,6 +50,7 @@ StereoPvn3d:
 
 
 StereoPvn3dLoss:
+  resnet_input_shape : [240, 320, 3]
   mse_loss_discount: 0.005
   l1_loss_discount: 0
   ssim_loss_discount: 0.5
