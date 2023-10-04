@@ -165,32 +165,85 @@ class StereoPvn3d(keras.Model):
         self.mlp_model = self.mlp_net.build_mlp_model(rgbd_features_shape=(self.num_pts, self.n_rgbd_mlp_feats))
         [H, W, _] = resnet_input_shape
 
+    # def sample_index_new(self, roi, num_sample_points, bs):
+    #     list_b = []
+    #     for i in (range(bs)):
+    #         list_points = []
+    #         y1, x1, y2, x2 = roi[i, 0], roi[i, 1], roi[i, 2], roi[i, 3]
+    #         for points in range(num_sample_points):
+    #             random_x = tf.random.uniform(shape=(), minval=x1, maxval=x2, dtype=tf.int32)
+    #             random_y = tf.random.uniform(shape=(), minval=y1, maxval=y2, dtype=tf.int32)
+    #             index = tf.stack([i, random_y, random_x])
+    #             list_points.append(index)
+    #         list_b.append(tf.stack(list_points))
+    #     return tf.stack(list_b)
+
+    def sample_index(self, b, h, w, roi, num_sample_points):
+        y1, x1, y2, x2 = roi[:, 0], roi[:, 1], roi[:, 2], roi[:, 3]
+        x_map, y_map = tf.meshgrid(tf.range(w, dtype=tf.int32), tf.range(h, dtype=tf.int32))
+        # print(x_map)
+        y1 = y1[:, tf.newaxis, tf.newaxis]  # add, h, w dims
+        x1 = x1[:, tf.newaxis, tf.newaxis]
+        y2 = y2[:, tf.newaxis, tf.newaxis]
+        x2 = x2[:, tf.newaxis, tf.newaxis]
+        # invalidate outside of roi
+        in_y = tf.logical_and(y_map[tf.newaxis, :, :] >= y1, y_map[tf.newaxis, :, :] < y2,)
+        # print('in_y', in_y)
+        in_x = tf.logical_and(x_map[tf.newaxis, :, :] >= x1,x_map[tf.newaxis, :, :] < x2,)
+        in_roi = tf.logical_and(in_y, in_x)
+        depth = tf.ones((b, h, w, 1))
+        # print(depth.shape)
+
+        # get masked indices (valid truncated depth inside of roi)
+        is_valid = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < 2.0)
+        inds = tf.where(tf.logical_and(in_roi, is_valid))
+        inds = tf.cast(inds, tf.int32)  # [None, 3]
+
+
+        inds = tf.random.shuffle(inds)
+        # print(f'inds{inds} - inds.shape{inds.shape}')
+        # print('inds[:,0]\n',inds[:,0])
+        # print('shape pf roi\n',tf.shape(roi)[0])
+
+        # split index list into [b, None, 3] ragged tensor by using the batch index
+        inds = tf.ragged.stack_dynamic_partitions(
+            inds, inds[:, 0], tf.shape(roi)[0]
+        )  # [b, None, 3]
+        # TODO if we dont have enough points, we pad the indices with 0s, how to handle that?
+        inds = inds[:, :num_sample_points].to_tensor()  # [b, num_points, 3]
+        # print(f'inds: {inds} - inds.shape:{inds.shape}')
+        return inds
 
     #@tf.function
     def call(self, inputs, training=None):
         full_rgb_l = inputs[0]
         full_rgb_r = inputs[1]  # another layer        
-        h, w = tf.shape(full_rgb_l)[1], tf.shape(full_rgb_r)[2]
-
+        b, h, w = tf.shape(full_rgb_l)[0], tf.shape(full_rgb_l)[1], tf.shape(full_rgb_r)[2]
         baseline = inputs[2][0]
         K = inputs[3][0]
-        # print('K', K)
         focal_length = K[0,0]
-        # print('focal_length', focal_length)
         intrinsics = inputs[3]
-        sampled_inds_in_roi = inputs[4]
-        depth = inputs[5]
-        bbox = inputs[6]
-        mesh_kpts = inputs[7]
+        roi = inputs[4]
+        mesh_kpts = inputs[5]
+        sampled_inds_in_original_image = self.sample_index(b, h, w, roi, self.num_pts)
 
-        norm_bbox = tf.cast(bbox / [h, w, h, w], tf.float32)
+        # crop the image to the aspect ratio for resnet and integer crop factor
+        bbox, crop_factor = self.get_crop_index(
+            roi, h, w, self.resnet_input_shape[0], self.resnet_input_shape[1]
+        )  # bbox: [b, 4], crop_factor: [b]
+
+
+        sampled_inds_in_roi = self.transform_indices_from_full_image_cropped(
+            sampled_inds_in_original_image, bbox, crop_factor
+        )
+
+        norm_bbox = tf.cast(bbox / [h, w, h, w], tf.float32)  # normalize bounding box
         cropped_rgbs_l = tf.image.crop_and_resize(
             tf.cast(full_rgb_l, tf.float32),
             norm_bbox,
             tf.range(tf.shape(full_rgb_l)[0]),
             self.resnet_input_shape[:2],
         )
-
         cropped_rgbs_r = tf.image.crop_and_resize(
             tf.cast(full_rgb_r, tf.float32),
             norm_bbox,
@@ -198,21 +251,11 @@ class StereoPvn3d(keras.Model):
             self.resnet_input_shape[:2],
         )
 
-        cropped_depth = tf.image.crop_and_resize(
-            tf.cast(depth, tf.float32),
-            norm_bbox,
-            tf.range(tf.shape(depth)[0]),
-            self.resnet_input_shape[:2],
-        )
-
         # stop gradients for preprocessing
-        # cropped_rgbs_l = tf.stop_gradient(cropped_rgbs_l)
-        # cropped_rgbs_r = tf.stop_gradient(cropped_rgbs_r)
-        # cropped_depth = tf.stop_gradient(cropped_depth)
-        # norm_bbox = tf.stop_gradient(norm_bbox)
-
-        #sampled_inds_in_roi = tf.stop_gradient(sampled_inds_in_roi)
-
+        cropped_rgbs_l = tf.stop_gradient(cropped_rgbs_l)
+        cropped_rgbs_r = tf.stop_gradient(cropped_rgbs_r)
+        sampled_inds_in_original_image = tf.stop_gradient(sampled_inds_in_original_image)
+        sampled_inds_in_roi = tf.stop_gradient(sampled_inds_in_roi)
 
 
         # StereoNet ouputs is of dimensions HxWx1032
@@ -348,10 +391,9 @@ class StereoPvn3d(keras.Model):
                 stereo_outputs = tf.concat([depth, stereo_outputs[..., 1:]], axis=-1, name="final_concat") #H x W x (n_features)
             else:
                 depth = stereo_outputs[..., :1]
-                
-        #print(f"stereo_outputs.shape: {stereo_outputs.shape} - stereo_outputs: {stereo_outputs}")
-
-        
+        xyz_pred = self.pcld_processor_tf_by_index(depth, intrinsics, sampled_inds_in_roi)
+        # xyz_pred = tf.ones_like(xyz_pred)
+        print(f'xyz_pred {xyz_pred}')
 
         crop_factor = False
 
@@ -369,17 +411,17 @@ class StereoPvn3d(keras.Model):
         #print('rgb_emb after match_choose', rgb_emb)
         camera_scale = 1
         feats_fused = rgb_emb
+        
         kp, sm, cp = self.mlp_model(feats_fused, training=training)
         if training:
-            return (depth, kp, sm, cp, norm_bbox)
+            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w)
         else:
-            xyz,  = pcld_processor_tf_batched_by_index(depth, intrinsics, self.num_pts, sampled_inds_in_roi)
-            batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz, kp, cp, sm, mesh_kpts])
+            batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz_pred, kp, cp, sm, mesh_kpts])
             return (
                 batch_R,
                 batch_t,
                 voted_kpts,
-                (depth, kp, sm, cp, norm_bbox)
+                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w)
             )
 
     # @tf.function
@@ -582,7 +624,7 @@ class StereoPvn3d(keras.Model):
         return xyz, feats, inds
 
     @staticmethod
-    def get_crop_index(roi, in_h, in_w, resnet_h, resnet_w):
+    def get_crop_index(roi, in_h, in_w, resnet_h, resnet_w, px_max_disp = 200):
         """Given a ROI [y1,x1,y2,x2] in an image with dimensions [in_h, in_w]]
         this function returns the indices and the integer crop factor to crop the image
         according to the original roi, but with the same aspect ratio as [resnet_h, resnet_w]
@@ -602,7 +644,8 @@ class StereoPvn3d(keras.Model):
             crop_factor (b,): Integer crop factor
         """
 
-        y1, x1, y2, x2 = roi[:, 0], roi[:, 1], roi[:, 2], roi[:, 3]
+        y1, x1, y2, x2 = roi[:, 0], tf.math.maximum(tf.zeros_like(roi[:, 1]), tf.math.subtract(roi[:,1], px_max_disp)), roi[:, 2], roi[:, 3]
+        # y1, x1, y2, x2 = roi[:, 0], roi[:, 1], roi[:, 2], roi[:, 3]
 
         x_c = tf.cast((x1 + x2) / 2, tf.int32)
         y_c = tf.cast((y1 + y2) / 2, tf.int32)
@@ -634,7 +677,33 @@ class StereoPvn3d(keras.Model):
 
         return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor
 
+    @staticmethod
+    def pcld_processor_tf_by_index(b_depth_pred, b_camera_matrix, b_sampled_index):
+        h_depth = tf.shape(b_depth_pred)[1]
+        w_depth = tf.shape(b_depth_pred)[2]
+        x_map, y_map = tf.meshgrid(
+            tf.range(w_depth, dtype=tf.int32), tf.range(h_depth, dtype=tf.int32)
+        )
 
+        # calculate xyz
+        cam_cx, cam_cy = b_camera_matrix[:, 0, 2], b_camera_matrix[:, 1, 2]
+        cam_fx, cam_fy = b_camera_matrix[:, 0, 0], b_camera_matrix[:, 1, 1]
+
+        # inds[..., 0] == index into batch
+        # inds[..., 1:] == index into y_map and x_map,  b times
+        sampled_ymap = tf.gather_nd(y_map, b_sampled_index[:, :, 1:])  # [b, num_points]
+        sampled_xmap = tf.gather_nd(x_map, b_sampled_index[:, :, 1:])  # [b, num_points]
+        sampled_ymap = tf.cast(sampled_ymap, tf.float32)
+        sampled_xmap = tf.cast(sampled_xmap, tf.float32)
+
+        # z = tf.gather_nd(roi_depth, inds)  # [b, num_points]
+        z = tf.gather_nd(b_depth_pred[..., 0], b_sampled_index)  # [b, num_points]
+        x = (sampled_xmap - cam_cx[:, tf.newaxis]) * z / cam_fx[:, tf.newaxis]
+        y = (sampled_ymap - cam_cy[:, tf.newaxis]) * z / cam_fy[:, tf.newaxis]
+        xyz = tf.stack((x, y, z), axis=-1)
+
+        return xyz
+    
     @staticmethod
     def transform_indices_from_full_image_cropped(
         sampled_inds_in_original_image, bbox, crop_factor

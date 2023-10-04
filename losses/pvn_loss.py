@@ -30,7 +30,10 @@ class PvnLoss:
         kp_pred, seg_pred, cp_pred = y_pred[0], y_pred[1], y_pred[2]
         xyz, sampled_inds, kpts_cpts = y_pred[3], y_pred[4], y_pred[5]
 
+        print(f'loss mask shape {mask.shape} ')
+
         mask_selected = tf.gather_nd(mask, sampled_inds)  # [b, n_pts, 1]
+        print(f'sampled_inds.shape {sampled_inds.shape}')
 
         kp_gt, cp_gt = self.get_offst(
             rt,

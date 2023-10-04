@@ -144,41 +144,88 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # C1 = (0.01 * max_val) ** 2
         # C2 = (0.03 * max_val) ** 2
         ssim = tf.image.ssim(y_true, y_pred, self.ssim_max_val, filter_size=self.ssim_filter_size, filter_sigma=1.5, k1=self.ssim_k1, k2=self.ssim_k2, return_index_map=False)
-        print(f"SSIM before mean: {ssim}")
+        #print(f"SSIM before mean: {ssim}")
         ssim = tf.reduce_mean(ssim, axis=-1)
-        print(f"SSIM after mean: {ssim}")
+        #print(f"SSIM after mean: {ssim}")
 
         # Compute SSIM loss (SSIM is a similiarity, so the 1 - SSIM is the loss)
         return 1 - ssim
+    
+    @staticmethod
+    def get_offst(
+        RT,  # [b, 4,4]
+        pcld_xyz,  # [b, n_pts, 3]
+        mask_selected,  # [b, n_pts, 1] 0|1
+        kpts_cpts,  # [b, 9,3]
+    ):
+        """Given a pointcloud, keypoints in a local coordinate frame and a transformation matrix,
+        this function calculates the offset for each point in the pointcloud to each
+        of the keypoints, if the are transformed by the transformation matrix.
+        Additonally a binary segmentation mask is used to set the offsets to 0 for points,
+        that are not part of the object.
+        The last keypoint is treated as the center point of the object.
+
+
+        Args:
+            RT (b,4,4): Homogeneous transformation matrix
+            pcld_xyz (b,n_pts,3): Pointcloud in camera frame
+            mask_selected (b,n_pts,1): Mask of selected points (0|1)
+            kpts_cpts (b,n_kpts,3): Keypoints in local coordinate frame
+
+        Returns:
+            kp_offsets: (b,n_pts,n_kpts,3) Offsets to the keypoints
+            cp_offsets: (b,n_pts,1,3) Offsets to the center point
+        """
+
+        # WHICH ONE IS CORRECT!?????
+        # transform kpts_cpts to camera frame using rt
+        kpts_cpts_cam = (
+            tf.matmul(kpts_cpts, tf.transpose(RT[:, :3, :3], (0, 2, 1))) + RT[:, tf.newaxis, :3, 3]
+        )
+
+        # calculate offsets to the pointcloud
+        kpts_cpts_cam = tf.expand_dims(kpts_cpts_cam, axis=1)  # [b, 1, 9, 3] # add num_pts dim
+        pcld_xyz = tf.expand_dims(pcld_xyz, axis=2)  # [b, n_pts, 1, 3] # add_kpts dim
+        offsets = tf.subtract(kpts_cpts_cam, pcld_xyz)  # [b, n_pts, 9, 3]
+        # mask offsets to the object points
+
+        # print("offsets shape:", offsets.shape)
+        # print("mask_selected shape:", mask_selected.shape)
+
+        offsets = offsets * tf.cast(mask_selected[:, :, tf.newaxis], tf.float32)
+        # offsets = tf.where(mask_selected[:, :, tf.newaxis] == 1, offsets, 0.0)
+        kp_offsets = offsets[:, :, :-1, :]  # [b, n_pts, 8, 3]
+        cp_offsets = offsets[:, :, -1:, :]  # [b, n_pts, 1, 3]
+        return kp_offsets, cp_offsets
 
     def call(self, y_true_list, y_pred_list):
-        # gt_depth = y_true[..., :1]
-        # gt_seg = y_true[..., 1:]
+        # Get data
+        [gt_depth, gt_RT, gt_mask] = y_true_list[0], y_true_list[1], y_true_list[2]
+        gt_mask = tf.expand_dims(gt_mask, axis=-1) # better to move this to simpose.py
 
-        # pred_depth = y_pred[..., :1]
-        # pred_seg = y_pred[..., 1:]
+        [pred_depth, pred_kp, pred_sm, pred_cp] = y_pred_list[0], y_pred_list[1], y_pred_list[2], y_pred_list[3]
+        xyz, sampled_inds, mesh_kpts, norm_bbox = y_pred_list[4], y_pred_list[5], y_pred_list[6],  y_pred_list[7]
+        w = y_pred_list[8]
 
-        # labels: depth, label_list, kp_targ_ofst, ctr_targ_ofst, mask_label
-        # print('y_true inside the loss funciton', y_true_list)
-        # print('y_pred inside the loss function', y_pred_list)
-
-
-        # data: rgb, rgb_R, self.baseline, self.intrinsic_matrix, sampled_index
-        # model_output: depth, kp, sm, cp
-        [gt_depth, gt_kp, gt_cp, mask_label, pnt_cld] = y_true_list
-        # change in [gt_depth, gt_kp, gt_cp, mask_label, pnt_cld] = y_true_list
-        [pred_depth, pred_kp, pred_sm, pred_cp, norm_bbox] = y_pred_list
-
-        print("Loss shapes")
-        print(f"depth: gt_depth.shape: {gt_depth.shape} - pred_depth.shape: {pred_depth.shape}")
-        print(f"kp: gt_kp.shape: {gt_kp.shape} - pred_kp.shape: {pred_kp.shape}")
-        print(f"cp: gt_cp.shape: {gt_cp.shape} - pred_cp: {pred_cp.shape}")
-        print(f"seg: mask_label.shape: {mask_label.shape} - pred_sm: {pred_sm.shape}")
+        # Processing data to compare gt and pred
+        mask_selected = tf.gather_nd(gt_mask, sampled_inds)
+        gt_kp, gt_cp = self.get_offst(
+            gt_RT,
+            xyz,
+            mask_selected,
+            mesh_kpts
+        )
 
 
         gt_depth = gt_depth[..., :1]
         pred_depth = pred_depth[..., :1]
 
+        # print(f"shape gt_depth: {gt_depth.shape} - dtype: {gt_depth.dtype}")
+        # print(f"shape pred_depth: {pred_depth.shape} - dtype: {pred_depth.dtype}")
+        # print(f"shape gt_kp: {gt_kp.shape} - dtype: {gt_kp.dtype}")
+        # print(f"shape pred_kp: {pred_kp.shape} - dtype: {pred_kp.dtype}")
+        # print(f"shape gt_cp: {gt_cp.shape} - dtype: {gt_cp.dtype}")
+        # print(f"shape pred_cp: {pred_cp.shape} - dtype: {pred_cp.dtype}")
         gt_depth = tf.image.crop_and_resize(
             tf.cast(gt_depth, tf.float32),
             norm_bbox,
@@ -192,11 +239,6 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         #l1_loss = self.l1(gt_depth, pred_depth)
         mse_loss = self.mse(gt_depth, pred_depth)
         mlse_loss = self.mlse(gt_depth, pred_depth)
-        # seg_loss_value = self.seg_loss_discount * self.seg_loss(gt_stereo_seg, pred_stereo_seg)
-
-        # ssim_loss = tf.math.reduce_mean(
-        #     1.0 - tf.image.ssim_multiscale(gt_depth, pred_depth, max_val=self.ssim_max_val)
-        # )
         ssim_loss_value = self.ssim_loss(gt_depth, pred_depth)
         
 
@@ -205,7 +247,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
 
         loss_kp = self.l1_loss(pred_ofst=pred_kp,
                                targ_ofst=gt_kp,
-                               mask_labels=mask_label)
+                               mask_labels=mask_selected)
         # if binary_loss is True:
 
         #     if not self.params.seg_from_logits:
@@ -215,20 +257,20 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         #     label = tf.argmax(label, axis=2)
         #     loss_seg = self.BinaryFocalLoss(label, seg_pre)  # return batch-wise value
         # else:
-        print(f"seg: mask_label.shape: {mask_label.shape} - pred_sm: {pred_sm.shape}")
-        print(f"seg: mask_label[:,:,0].shape: {mask_label[:,:,0].shape} - pred_sm[:,:,0]: {pred_sm[:,:,0].shape}")
-        print(f"seg: mask_label[:,:,0].dtype: {mask_label[:,:,0].dtype} - pred_sm[:,:,0]: {pred_sm[:,:,0].dtype}")
-        mask_label = tf.cast(mask_label, dtype=tf.float32)
-        pred_sm = tf.cast(pred_sm, dtype=tf.float32)
+        # print(f"seg: mask_label.shape: {mask_label.shape} - pred_sm: {pred_sm.shape}")
+        # print(f"seg: mask_label[:,:,0].shape: {mask_label[:,:,0].shape} - pred_sm[:,:,0]: {pred_sm[:,:,0].shape}")
+        # print(f"seg: mask_label[:,:,0].dtype: {mask_label[:,:,0].dtype} - pred_sm[:,:,0]: {pred_sm[:,:,0].dtype}")
+        # mask_label = tf.cast(mask_label, dtype=tf.float32)
+        # pred_sm = tf.cast(pred_sm, dtype=tf.float32)
 
 
-        loss_seg = self.BinaryFocalLoss(mask_label, pred_sm)  # labels [bs, n_pts, n_cls] this is from logits
+        loss_seg = self.BinaryFocalLoss(mask_selected, pred_sm)  # labels [bs, n_pts, n_cls] this is from logits
         # change in something similiar: tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False, reduction=self.reduction)
 
 
         loss_cp = self.l1_loss(pred_ofst=pred_cp,
                                targ_ofst=gt_cp,
-                              mask_labels=mask_label)
+                              mask_labels=mask_selected)
 
         # if self.params.distribute_training:
         #     loss_seg = tf.reduce_sum(loss_seg) * (1 / bs)
@@ -240,7 +282,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         print('loss_kp', loss_kp)
         print('loss_seg', loss_seg)
         print('loss_cp', loss_cp)
-        #print('loss_ssim', ssim_loss)
+        print('loss_ssim', ssim_loss_value)
         print('loss_mse', mse_loss)
         print('loss_mlse', mlse_loss)
         #print('loss_l1_dpt', l1_loss)        
