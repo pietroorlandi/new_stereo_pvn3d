@@ -12,6 +12,11 @@ from losses.stereopvn3d_loss import StereoPvn3dLoss
 
 
 class TrainE2E(cvde.job.Job):
+
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs) #super().__init__()
+        self.gt_depth = None
+
     def run(self):
         job_cfg = self.config
 
@@ -37,11 +42,12 @@ class TrainE2E(cvde.job.Job):
             val_gen = Val6IMPOSE
 
         train_set = train_gen(**train_config)
+        # val_set = train_gen(**train_config)
+        # self.demo_set = train_gen(**train_config)
         val_set = val_gen(**val_config)
         self.demo_set = val_gen(**val_config)
         self.demo_set_tf = self.demo_set.to_tf_dataset().take(self.num_validate)
         self.mesh_vertices = val_set.mesh_vertices
-
         self.loss_fn = loss_fn = StereoPvn3dLoss(**job_cfg["StereoPvn3dLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
 
@@ -49,7 +55,7 @@ class TrainE2E(cvde.job.Job):
             self.model.load_weights(job_cfg['weights'])
 
         
-        self.log_visualization(-1)
+        # self.log_visualization(-1)
 
         
 
@@ -57,6 +63,7 @@ class TrainE2E(cvde.job.Job):
         train_set_tf = train_set.to_tf_dataset()
         val_set_tf = val_set.to_tf_dataset()
         cumulative_steps = 0
+        
 
         
         for epoch in range(num_epochs):
@@ -65,16 +72,25 @@ class TrainE2E(cvde.job.Job):
                 desc=f"Train ({epoch}/{num_epochs-1})",
             )
 
+            print(f'Starting epoch {epoch} ----------------------------------------')
+
             loss_vals = {}
             for x, y in train_set_tf:
-                print(f"len(x): {len(x)}")
-                print(f"len(y): {len(y)}")
-
+                gt_depth = y[0]
+                baseline = x[2]
+                K = x[3][0]
+                focal_length = K[0,0]
+                gt_disp = tf.math.divide_no_nan(baseline * focal_length, gt_depth)
+                y = (y[0], y[1], y[2], gt_disp)
                 if self.is_stopped():
                     return
+
+                
                 with tf.GradientTape() as tape:
                     pred = model(x, training=True)
-                    loss_combined, mse_loss, mlse_loss, ssim_loss, loss_cp, loss_kp, loss_seg = loss_fn.call(y, pred)
+                    print(f'len of sampled index {pred[5].shape[1]}')
+                    print(f'kp = pred[1] {tf.math.reduce_mean(pred[1]).numpy()}')
+                    loss_combined, mse_loss, mlse_loss, ssim_loss, deriv_loss, loss_cp, loss_kp, loss_seg, loss_he, loss_pcld = loss_fn.call(y, pred)
                 gradients = tape.gradient(loss_combined, model.trainable_variables)
                 optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
@@ -82,9 +98,13 @@ class TrainE2E(cvde.job.Job):
                 loss_vals["mse_loss"] = loss_vals.get("mse_loss", []) + [mse_loss.numpy()]
                 loss_vals["mlse_loss"] = loss_vals.get("mlse_loss", []) + [mlse_loss.numpy()]
                 loss_vals["ssim_loss"] = loss_vals.get("ssim_loss", []) + [ssim_loss.numpy()]
+                loss_vals["deriv_loss"] = loss_vals.get("deriv_loss", []) + [deriv_loss.numpy()]
                 loss_vals["loss_cp"] = loss_vals.get("loss_cp", []) + [loss_cp.numpy()]
                 loss_vals["loss_kp"] = loss_vals.get("loss_kp", []) + [loss_kp.numpy()]
                 loss_vals["loss_seg"] = loss_vals.get("loss_seg", []) + [loss_seg.numpy()]
+                loss_vals["loss_he"] = loss_vals.get("loss_he", []) + [loss_he.numpy()]
+                loss_vals["loss_pcld"] = loss_vals.get("loss_pcld", []) + [loss_pcld.numpy()]
+
 
                 bar.update(1)  # update by batchsize
                 bar.set_postfix(
@@ -92,6 +112,13 @@ class TrainE2E(cvde.job.Job):
                         "loss": millify(loss_combined.numpy(), precision=4),
                     }
                 )
+                if cumulative_steps == 0:
+                    print(f"Summary of the model: {model.summary()}")
+
+                if cumulative_steps%100 == 0:
+                    self.log_visualization(cumulative_steps//100)
+
+
                 cumulative_steps+=1
 
             bar.close()
@@ -101,7 +128,7 @@ class TrainE2E(cvde.job.Job):
                 loss_vals[k] = tf.reduce_mean(v)
                 self.tracker.log(f"train_{k}", loss_vals[k], epoch)
 
-            self.log_visualization(epoch)
+            # self.log_visualization(epoch)
 
             loss_vals = {}
             for x, y in tqdm(
@@ -113,8 +140,24 @@ class TrainE2E(cvde.job.Job):
                 _, _, _, pred = model(x, training=False)
                 print(f"len(pred): {len(pred)}")
 
+                # pred = model(x, training=True)
+                # resnet_input_shape = pred[0].shape[1:3]
+                # gt_depth = tf.image.crop_and_resize(
+                #     tf.cast(y[0], tf.float32),
+                #     pred[7],
+                #     tf.range(tf.shape(y[0])[0]),
+                #     resnet_input_shape
+                # )
+                # y = (gt_depth, y[1], y[2])
+                gt_depth = y[0]
+                baseline = x[2]
+                K = x[3][0]
+                focal_length = K[0,0]
+                gt_disp = tf.math.divide_no_nan(baseline * focal_length, gt_depth)
+                y = (y[0], y[1], y[2], gt_disp)
+
                 l = loss_fn.call(y, pred)
-                for k, v in zip(["loss","mlse_loss","ssim_loss","loss_cp", "loss_kp", "loss_seg"], l):
+                for k, v in zip(["loss","mse_loss","mlse_loss", "ssim_loss", "deriv_loss", "loss_cp", "loss_kp", "loss_seg", "loss_he", "loss_pcld"], l): 
                     loss_vals[k] = loss_vals.get(k, []) + [v]
 
             for k, v in loss_vals.items():
@@ -123,6 +166,14 @@ class TrainE2E(cvde.job.Job):
 
     def log_visualization(self, epoch: int, logs=None):
         i = 0
+        sobel_x = tf.constant([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=tf.float32)
+        sobel_y = tf.constant([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=tf.float32)
+
+        sobel_x = tf.expand_dims(tf.expand_dims(sobel_x, axis=2), axis=3)
+        sobel_y = tf.expand_dims(tf.expand_dims(sobel_y, axis=2), axis=3)
+
+        # sobel_x = tf.expand_dims(sobel_x, axis=2)
+        # sobel_y = tf.expand_dims(sobel_y, axis=2)
         for x, y in self.demo_set_tf:
             (
                 b_rgb,
@@ -133,20 +184,21 @@ class TrainE2E(cvde.job.Job):
                 b_mesh_kpts,
             ) = x
 
+
+
             b_depth_gt, b_RT_gt, b_mask_gt = y
 
             (
                 b_R,
                 b_t,
                 b_kpts_pred,
-                (b_depth_pred, b_kp_offset_pred, b_seg_pred, b_cp_offset_pred, b_xyz_pred, b_sampled_inds_in_original_image, b_mesh_kpts, b_norm_bbox, b_cropped_rgbs_l, b_cropped_rgbs_r, b_weights),
-            ) = self.model(x, training=False)
+                (b_depth_pred, b_kp_offset_pred, b_seg_pred, b_cp_offset_pred, b_xyz_pred, b_sampled_inds_in_original_image, b_mesh_kpts, b_norm_bbox, b_cropped_rgbs_l, b_cropped_rgbs_r, b_weights, b_attention, b_intrinsics_matrix, b_crop_factor, _),) = self.model(x, training=False)
             # b_depth_pred, b_kp_offset_pred, b_mask_selected_pred, b_cp_offset_pred, b_norm_bbox = self.model(x, training=False)
-
+            print(f'In log_visual kp = pred[1] {tf.math.reduce_mean(b_kp_offset_pred).numpy()}')
             h, w = tf.shape(b_rgb)[1], tf.shape(b_rgb)[2]
 
             # get xyz gt
-            b_xyz_gt = self.model.pcld_processor_tf_by_index(b_depth_gt, b_intrinsics, b_sampled_inds_in_original_image)
+            b_xyz_gt = self.model.pcld_processor_tf_by_index(b_depth_gt+0.0001, b_intrinsics, b_sampled_inds_in_original_image)
             b_mask_gt = tf.expand_dims(b_mask_gt, axis=-1) # better to move it to simpose.py
             b_mask_selected = tf.gather_nd(b_mask_gt, b_sampled_inds_in_original_image)
             # get gt offset
@@ -165,6 +217,8 @@ class TrainE2E(cvde.job.Job):
 
             # attention weights
             [batch_w1, batch_w2, batch_w3, batch_w4, batch_w5] = b_weights
+            [batch_a1, batch_a2, batch_a3, batch_a4, batch_a5] = b_attention
+
 
 
             b_rgb = b_rgb.numpy()
@@ -193,6 +247,7 @@ class TrainE2E(cvde.job.Job):
             # keypoint vectors
             b_kpts_vectors_pred = b_xyz_pred[:, :, None, :].numpy() + b_offsets_pred  # [b, n_pts, 9, 3]
             b_kpts_vectors_gt = b_xyz_gt[:, :, None, :].numpy() + b_offsets_gt
+            b_kpts_offset_pred = b_xyz_pred[:, :, None, :].numpy() + b_offsets_pred  # [b, n_pts, 9, 3]
 
             # keypoints
             b_kpts_gt = (
@@ -219,13 +274,24 @@ class TrainE2E(cvde.job.Job):
             )
             
             b_kpts_gt = self.project_batch_to_image(b_kpts_gt, b_intrinsics)
-            print(f"b_kpts_pred before project_batch_to_image: {b_kpts_pred}")
+            #print(f"b_kpts_pred before project_batch_to_image: {b_kpts_pred}")
             b_kpts_pred = self.project_batch_to_image(b_kpts_pred, b_intrinsics)
-            print(f"b_kpts_pred after project_batch_to_image: {b_kpts_pred}")
+            #print(f"b_kpts_pred after project_batch_to_image: {b_kpts_pred}")
             b_kpts_vectors_gt = self.project_batch_to_image(b_kpts_vectors_gt, b_intrinsics)
             b_kpts_vectors_pred = self.project_batch_to_image(b_kpts_vectors_pred, b_intrinsics)
             b_xyz_projected_pred = self.project_batch_to_image(b_xyz_pred, b_intrinsics)  # [b, n_pts, 3]
             b_xyz_projected_gt = self.project_batch_to_image(b_xyz_gt, b_intrinsics)  # [b, n_pts, 3]
+
+            # print(f'Check for Nan xyz {b_xyz_gt} - xyz_projected {b_xyz_projected_gt }')
+            # print(f'np.where(np.isnan(b_xyz_projected_gt)) {np.where(np.isnan(b_xyz_projected_gt))}') # \n b_xyz_gt[np.where(np.isnan(b_xyz_projected_gt))] {b_xyz_gt[np.where(np.isnan(b_xyz_projected_gt))]}')
+             # Apply Sobel filter in the y-direction using convolution
+            b_sobel_x_der = tf.nn.conv2d(b_depth_gt, sobel_x, strides=[1, 1, 1, 1], padding='SAME').numpy()
+            b_sobel_y_der = tf.nn.conv2d(b_depth_gt, sobel_y, strides=[1, 1, 1, 1], padding='SAME').numpy()
+            # b_sobel_xx_der = tf.nn.conv2d(b_sobel_x_der, sobel_x, strides=[1, 1, 1, 1], padding='SAME')
+            # b_sobel_yy_der = tf.nn.conv2d(b_sobel_y_der, sobel_y, strides=[1, 1, 1, 1], padding='SAME')
+            # b_sobel_xy_der = tf.nn.conv2d(b_sobel_x_der, sobel_y, strides=[1, 1, 1, 1], padding='SAME')
+            # b_sobel_yx_der = tf.nn.conv2d(b_sobel_y_der, sobel_x, strides=[1, 1, 1, 1], padding='SAME')
+
 
 
 
@@ -235,6 +301,8 @@ class TrainE2E(cvde.job.Job):
                 crop_rgb_r,
                 crop_depth_pred,
                 crop_depth_gt,
+                sobel_x_der,
+                sobel_y_der,
                 norm_bbox,
                 roi,
                 seg_pred,
@@ -245,22 +313,30 @@ class TrainE2E(cvde.job.Job):
                 mesh_vertices_gt,
                 offsets_pred,
                 offsets_gt,
-                # crop_factor,
+                crop_factor,
                 kpts_vectors_pred,
                 kpts_vectors_gt,
                 xyz_projected_pred,
                 xyz_projected_gt,
+                kpts_offset_pred,
                 w1,
                 w2,
                 w3,
                 w4,
                 w5,
+                a1,
+                a2,
+                a3,
+                a4,
+                a5,
             ) in zip(
                 b_rgb,
                 b_cropped_rgbs_l,
                 b_cropped_rgbs_r,
                 b_depth_pred,
                 b_depth_gt,
+                b_sobel_x_der,
+                b_sobel_y_der,
                 b_norm_bbox,
                 b_roi,
                 b_seg_pred,
@@ -271,38 +347,56 @@ class TrainE2E(cvde.job.Job):
                 b_mesh_gt,
                 b_offsets_pred,
                 b_offsets_gt,
-                # b_crop_factor,
+                b_crop_factor,
                 b_kpts_vectors_pred,
                 b_kpts_vectors_gt,
                 b_xyz_projected_pred,
                 b_xyz_projected_gt,
+                b_kpts_offset_pred,
                 batch_w1,
                 batch_w2,
                 batch_w3,
                 batch_w4,
                 batch_w5,
+                batch_a1,
+                batch_a2,
+                batch_a3,
+                batch_a4,
+                batch_a5,
             ):
- 
+                
+
+               
+                # Compute the gradient magnitude (norm)
+                gradient_magnitude = np.sqrt(np.square(sobel_x_der) + np.square(sobel_y_der))
+                grad_mask = np.where(gradient_magnitude < 0.1, 1, 0)
+                vis_der_grad = self.draw_depth(sobel_x_der, sobel_y_der)
+                self.tracker.log(f"Derivative ({i})", vis_der_grad, index=epoch)
+                vis_mask_grad = self.draw_depth(grad_mask, grad_mask)
+                self.tracker.log(f"mask grad ({i})", vis_mask_grad, index=epoch)
+                
+
+
+        
                 vis_seg = self.draw_segmentation(rgb.copy(), sampled_inds, seg_pred, roi)
                 self.tracker.log(f"RGB ({i})", vis_seg, index=epoch)
-
+                
+                print(f'crop_depth_pred {crop_depth_pred.shape} - crop_depth_gt {crop_depth_gt.shape} ')
                 vis_depth = self.draw_depth(crop_depth_pred, crop_depth_gt)
                 self.tracker.log(f"Depth ({i})", vis_depth, index=epoch)
 
                 self.tracker.log(f"RGB R (crop) ({i})", crop_rgb_r.astype(np.uint8), index=epoch)
                 self.tracker.log(f"RGB L (crop) ({i})", crop_rgb.astype(np.uint8), index=epoch)
 
-
                 vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices, mesh_vertices_gt)
                 self.tracker.log(f"RGB (mesh) ({i})", vis_mesh, index=epoch)
 
 
-                print(f'kpts_gt {kpts_gt} - kpts_gt {kpts_gt.shape}')
-                print(f'kpts_pred {kpts_pred} - kpts_pred {kpts_pred.shape}')
+                # print(f'kpts_gt {kpts_gt} - kpts_gt {kpts_gt.shape}')
+                # print(f'kpts_pred {kpts_pred} - kpts_pred {kpts_pred.shape}')
 
                 vis_kpts = self.draw_keypoint_correspondences(rgb.copy(), roi, kpts_gt, kpts_pred)
                 self.tracker.log(f"RGB (kpts) ({i})", vis_kpts, index=epoch)
-                print(f'crop_rgb_r.shape {crop_rgb_r.shape}')
 
                 #self.tracker.log(f"RGBR ({i})", crop_rgb_r, index=epoch)
 
@@ -312,8 +406,9 @@ class TrainE2E(cvde.job.Job):
                     offsets_pred,
                     sampled_inds,
                     kpts_pred,
+                    cropped_rgb=crop_rgb,
                     seg=seg_pred,
-                    radius=1, # int(crop_factor),
+                    radius=int(crop_factor),
                 )
                 vis_offsets_gt = self.draw_keypoint_offsets(
                     rgb.copy(),
@@ -321,28 +416,36 @@ class TrainE2E(cvde.job.Job):
                     offsets_gt,
                     sampled_inds,
                     kpts_gt,
-                    radius=1, # int(crop_factor),
+                    cropped_rgb=crop_rgb,
+                    radius=int(crop_factor),
                 )
+
+                
                 # assemble images side-by-side
                 vis_offsets = np.concatenate([vis_offsets, vis_offsets_gt], axis=1)
                 self.tracker.log(f"RGB (offsets) ({i})", vis_offsets, index=epoch)
 
-                #vis_vectors_gt = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_vectors_gt
-                #)
 
-                # vis_vectors = self.draw_keypoint_vectors(
-                #     rgb.copy(),
-                #     roi,
-                #     offsets_pred,
-                #     kpts_pred,
-                #     xyz_projected,
-                #     kpts_vectors_pred,
-                #     seg=seg_pred,
-                # )
+                vis_vectors_gt = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_vectors_gt
+                )
 
-                # # assemble images side-by-side
-                # vis_vectors = np.concatenate([vis_vectors, vis_vectors_gt], axis=1)
-                # self.tracker.log(f"RGB (vectors) ({i})", vis_vectors, index=epoch)
+                vis_vectors_hybrid = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_offset_pred
+                )
+
+
+                vis_vectors = self.draw_keypoint_vectors(
+                    rgb.copy(),
+                    roi,
+                    offsets_pred,
+                    kpts_pred,
+                    xyz_projected_pred,
+                    kpts_vectors_pred,
+                    seg=seg_pred,
+                )
+
+                # assemble images side-by-side
+                vis_vectors = np.concatenate([vis_vectors, vis_vectors_gt, vis_vectors_hybrid], axis=1)
+                self.tracker.log(f"RGB (vectors) ({i})", vis_vectors, index=epoch)
 
 
                 vis_w1 = self.draw_weights(w1)
@@ -359,6 +462,22 @@ class TrainE2E(cvde.job.Job):
 
                 vis_w5 = self.draw_weights(w5)
                 self.tracker.log(f"Weights 5 ({i})", vis_w5, index=epoch)
+
+                # draw also attended_right images (x output of the model)
+                vis_a1 = self.draw_weights(a1)
+                self.tracker.log(f"Attentded Right 1 ({i})", vis_a1, index=epoch)
+
+                vis_a2 = self.draw_weights(a2)
+                self.tracker.log(f"Attended Right 2 ({i})", vis_a2, index=epoch)
+
+                vis_a3 = self.draw_weights(a3)
+                self.tracker.log(f"Attended Right 3 ({i})", vis_a3, index=epoch)
+
+                vis_a4 = self.draw_weights(a4)
+                self.tracker.log(f"Attended Right 4 ({i})", vis_a4, index=epoch)
+
+                vis_a5 = self.draw_weights(a5)
+                self.tracker.log(f"Attended Right 5 ({i})", vis_a5, index=epoch)
 
 
 
@@ -398,19 +517,32 @@ class TrainE2E(cvde.job.Job):
     
     def draw_depth(self, crop_depth_pred, crop_depth_gt):
         h, w = crop_depth_pred.shape[:2]
-        assembled = np.zeros((h, 2 * w, 3), dtype=np.uint8)
+        assembled = np.zeros((h, 3 * w, 3), dtype=np.uint8)
+        # crop_depth_pred = np.clip(0.0, 5.0)
+        #scaled_image = np.clip(((crop_depth_pred/5) * 255),0,255).astype(np.uint8)
+        scaled_image = (crop_depth_pred - np.mean(crop_depth_pred)) / (np.max(crop_depth_pred) - np.min(crop_depth_pred)) #(img_data - np.min(img_data)) / (np.max(img_data) - np.min(img_data)) and (img_data_normalized * 255).astype(np.uint8)
+        # print(f'scaled_image.shape {scaled_image.shape}')
+        a = np.concatenate([scaled_image, scaled_image, scaled_image], axis=-1)
+        # print('scaled image after concat', a.shape)
+        im = (a*255).astype(np.uint8)
+        #return cv2.cvtColor(scaled_image, cv2.COLOR_GRAY2RGB)
+
+        #cv2.imwrite('pred_depth.png', crop_depth_pred *255/5)
         color_depth = lambda d: cv2.applyColorMap(
             cv2.convertScaleAbs(d, alpha=255 / 1.5), cv2.COLORMAP_JET
         )
 
         colored_gt = color_depth(crop_depth_gt)
-        colored_pred = color_depth(crop_depth_pred)
+        # colored_pred = color_depth(crop_depth_pred)
+        colored_pred = cv2.applyColorMap(im, cv2.COLORMAP_JET)
 
         assembled[:, :w, :] = colored_gt
-        assembled[:, w:, :] = colored_pred
-        print(f"crop_depth_pred.shape: {crop_depth_pred.shape}")
-        print(f"crop_depth_gt.shape: {crop_depth_gt.shape}")
-        print(f"assembled.shape: {assembled.shape}")
+        assembled[:, w:w*2, :] = colored_pred
+        assembled[:, w*2:, :] = im
+
+        # print(f"crop_depth_pred.shape: {crop_depth_pred.shape}")
+        # print(f"crop_depth_gt.shape: {crop_depth_gt.shape}")
+        # print(f"assembled.shape: {assembled.shape}")
 
         return assembled
 
@@ -439,7 +571,7 @@ class TrainE2E(cvde.job.Job):
         kpts_pred[..., 2] = (kpts_pred[..., 2] - np.min(kpts_pred[..., 2])) / (
             np.max(kpts_pred[..., 2]) - np.min(kpts_pred[..., 2])
         )
-        print(f'In draw_keypoint_correspondences kpts_pred[..., 2]: {kpts_pred[..., 2]}')
+        # print(f'In draw_keypoint_correspondences kpts_pred[..., 2]: {kpts_pred[..., 2]}')
 
         for (x_gt, y_gt, z_gt), (x_pred, y_pred, z_pred) in zip(kpts_gt, kpts_pred):
             gt_color = np.array((0, 255, 0), dtype=np.uint8)
@@ -490,24 +622,23 @@ class TrainE2E(cvde.job.Job):
         coors = tf.floor(coors)
         return tf.concat([coors, pts[..., 2:]], axis=-1).numpy()
 
-    def draw_keypoint_offsets(self, rgb, roi, offsets, sampled_inds, kpts_gt, radius=1, seg=None):
-        cropped_rgb = self.crop_to_roi(rgb, roi, margin=10)
+    def draw_keypoint_offsets(self, rgb, roi, offsets, sampled_inds, kpts_gt, cropped_rgb, radius=1, seg=None):
+        # cropped_rgb = self.crop_to_roi(rgb, roi, margin=10)
         h, w = cropped_rgb.shape[:2]
         vis_offsets = np.zeros((h * 3, w * 3, 3), dtype=np.uint8).astype(np.uint8)
-
         if seg is None:
             seg = [None] * len(sampled_inds)
 
         for i in range(9):
             # offset_view = np.zeros_like(rgb, dtype=np.uint8)
-            offset_view = rgb.copy() // 3
+            offset_view = cropped_rgb.copy() // 3
 
             # get color hue from offset
             hue = np.arctan2(offsets[:, i, 1], offsets[:, i, 0]) / np.pi
             hue = (hue + 1) / 2
             hue = (hue * 180).astype(np.uint8)
             # value = np.ones_like(hue) * 255
-            value = (np.linalg.norm(offsets[:, i, :], axis=-1) / 0.1 * 255).astype(np.uint8)
+            value = np.clip((np.linalg.norm(offsets[:, i, :], axis=-1) / 0.1 * 255), 0, 255).astype(np.uint8)
             hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
             colors_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)[0]
 
@@ -531,7 +662,7 @@ class TrainE2E(cvde.job.Job):
                 thickness=1,
             )
 
-            offset_view = self.crop_to_roi(offset_view, roi, margin=10)
+            # offset_view = self.crop_to_roi(offset_view, roi, margin=10)
             vis_offsets[
                 h * (i // 3) : h * (i // 3 + 1), w * (i % 3) : w * (i % 3 + 1)
             ] = offset_view
@@ -590,15 +721,20 @@ class TrainE2E(cvde.job.Job):
 
     def draw_weights(self, attention):
         color_attention = lambda d: cv2.applyColorMap(
-                    cv2.convertScaleAbs(d, alpha=255 / 1.5), cv2.COLORMAP_JET
+                    cv2.convertScaleAbs(d, alpha=255), cv2.COLORMAP_JET
                 )
-        h_att, w_att = attention[:,:,0].shape[:2]
-        assembled_att1 = np.zeros((h_att, 3 * w_att, 3), dtype=np.uint8)
-        colored_attention1 = color_attention(attention[:,:,0].numpy())
-        colored_attention2 = color_attention(attention[:,:,1].numpy())
-        colored_attention3 = color_attention(attention[:,:,2].numpy())
+        h_att, w_att, channels = attention[:,:,:].shape[:3]
 
-        assembled_att1[:, :w_att, :] = colored_attention1
-        assembled_att1[:, w_att:2*w_att, :] = colored_attention2
-        assembled_att1[:, w_att*2:3*w_att, :] = colored_attention3
+        assembled_att1 = np.zeros((h_att, np.min([channels, 7]) * w_att, 3), dtype=np.uint8)
+        for i in range(channels):
+            colored_attention = color_attention(attention[:,:,-i].numpy())
+            # print(f'colored_attention {colored_attention.shape}')
+            # print(f'starting index {w_att*i} - send index {w_att*(i+1)}')
+            assembled_att1[:, w_att*i:w_att*(i+1), :] = colored_attention
+            #assembled_att1[:, w_att:2*w_att, :] = colored_attention2
+            #assembled_att1[:, w_att*2:3*w_att, :] = colored_attention3
+            if i == 6:
+                break
         return assembled_att1
+    
+    

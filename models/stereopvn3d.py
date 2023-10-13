@@ -95,6 +95,7 @@ class StereoPvn3d(keras.Model):
         #self.resid4 = ResIdentity(filters=(f14, f24), name="d5_4")
         self.resup1 = ResUp(s=2, filters=(f13, f23), name="d5_5")
         # self.attention2 = StereoAttention(channels=4, width=4, dilation=3)
+        self.resred0 = ResReduce(f24)
         self.attention2 = DisparityAttention(max_disparity=3)
         self.resred1 = ResReduce(f24)
         self.resid4 = ResIdentity(filters=(f14, f24), name="d4_1")
@@ -125,7 +126,7 @@ class StereoPvn3d(keras.Model):
         self.resid15 = ResIdentity(filters=(f14, f24), name="d1_3")
 
         self.head1 = tf.keras.layers.Conv2D(
-            16,
+            128,
             kernel_size=(1, 1),
             strides=(1, 1),
             padding="valid",
@@ -133,23 +134,35 @@ class StereoPvn3d(keras.Model):
             name="deph_conv_1",
         )
         self.bn = tf.keras.layers.BatchNormalization()
-        self.leaky_relu = tf.keras.layers.LeakyReLU()
-        n_cls = 6  # + background + depth
+        self.relu = tf.keras.layers.ReLU()
+        # n_cls = 6  # + background + depth
         #self.n_rgbd_feats = 
         
 
-        self.n_rgbd_mlp_feats = self.dense_fusion_params.num_embeddings + self.dense_fusion_params.rgbd_feats2_conv1d_dim + self.dense_fusion_params.rgb_conv1d_dim + self.dense_fusion_params.pcl_conv1d_dim + 3
-
+        self.n_rgbd_mlp_feats = 512 #self.dense_fusion_params.num_embeddings + self.dense_fusion_params.rgbd_feats2_conv1d_dim + self.dense_fusion_params.rgb_conv1d_dim + self.dense_fusion_params.pcl_conv1d_dim + 3
+        #self.n_rgbd_mlp_feats = 100
         self.dense_fusion_layer = Conv1D(filters=self.n_rgbd_mlp_feats, kernel_size=1, activation='relu') # unused
 
         self.head2 = tf.keras.layers.Conv2D(
-            self.n_rgbd_mlp_feats,
+            self.n_rgbd_mlp_feats -2, # From the total of n_rgbd_mlp_feats should be removed depth and added point cloud
             kernel_size=(1, 1),
             strides=(1, 1),
             padding="valid",
             kernel_regularizer=tf.keras.regularizers.l2(0.001),
             name="deph_conv_2",
+            activation = 'relu',
         )
+
+        self.disp_head = tf.keras.layers.Conv2D(
+            1, 
+            kernel_size=(1, 1),
+            strides=(1, 1),
+            padding="valid",
+            kernel_regularizer=tf.keras.regularizers.l2(0.001),
+            name="disp_conv",
+        )
+
+
         self.cal1 = ContextAdj(filter=32)
         self.cal2 = ContextAdj(filter=64)
 
@@ -164,6 +177,9 @@ class StereoPvn3d(keras.Model):
 
         self.mlp_model = self.mlp_net.build_mlp_model(rgbd_features_shape=(self.num_pts, self.n_rgbd_mlp_feats))
         [H, W, _] = resnet_input_shape
+
+        self.sobel_x = tf.constant([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=tf.float32)
+        self.sobel_y = tf.constant([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=tf.float32)
 
     # def sample_index_new(self, roi, num_sample_points, bs):
     #     list_b = []
@@ -191,12 +207,13 @@ class StereoPvn3d(keras.Model):
         # print('in_y', in_y)
         in_x = tf.logical_and(x_map[tf.newaxis, :, :] >= x1,x_map[tf.newaxis, :, :] < x2,)
         in_roi = tf.logical_and(in_y, in_x)
-        depth = tf.ones((b, h, w, 1))
+        # depth = tf.ones((b, h, w, 1))
         # print(depth.shape)
 
         # get masked indices (valid truncated depth inside of roi)
-        is_valid = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < 2.0)
-        inds = tf.where(tf.logical_and(in_roi, is_valid))
+        # is_valid = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < 2.0)
+        # inds = tf.where(tf.logical_and(in_roi, is_valid))
+        inds = tf.where(in_roi)
         inds = tf.cast(inds, tf.int32)  # [None, 3]
 
 
@@ -210,11 +227,15 @@ class StereoPvn3d(keras.Model):
             inds, inds[:, 0], tf.shape(roi)[0]
         )  # [b, None, 3]
         # TODO if we dont have enough points, we pad the indices with 0s, how to handle that?
-        inds = inds[:, :num_sample_points].to_tensor()  # [b, num_points, 3]
+        inds = inds[:, :num_sample_points].to_tensor(shape=(b, num_sample_points, 3))  # [b, num_points, 3]
+        # _, tensor_points, _ = tf.shape(inds)
+        # if tensor_points!=num_sample_points:
+        #     print(f'tensor points {tensor_points} different from num_sample_pts {num_sample_points}')
+        #     inds = tf.pad(inds, tf.constant([[0,0],[0, num_sample_points-tensor_points], [0,0]]))
         # print(f'inds: {inds} - inds.shape:{inds.shape}')
         return inds
 
-    #@tf.function
+    @tf.function
     def call(self, inputs, training=None):
         full_rgb_l = inputs[0]
         full_rgb_r = inputs[1]  # another layer        
@@ -225,6 +246,7 @@ class StereoPvn3d(keras.Model):
         intrinsics = inputs[3]
         roi = inputs[4]
         mesh_kpts = inputs[5]
+
         sampled_inds_in_original_image = self.sample_index(b, h, w, roi, self.num_pts)
 
         # crop the image to the aspect ratio for resnet and integer crop factor
@@ -251,6 +273,8 @@ class StereoPvn3d(keras.Model):
             self.resnet_input_shape[:2],
         )
 
+
+
         # stop gradients for preprocessing
         cropped_rgbs_l = tf.stop_gradient(cropped_rgbs_l)
         cropped_rgbs_r = tf.stop_gradient(cropped_rgbs_r)
@@ -263,8 +287,15 @@ class StereoPvn3d(keras.Model):
         f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
 
         deep = True
+        attention = []
         # x, w, w_1 = self.attention1(f_l_5, f_r_5)
         x, w = self.attention1([f_l_5, f_r_5])
+        x = tf.concat([x, w[-1]], axis=-1)
+        attention.append(x)
+
+        x = self.resred0(x)
+
+
         print(f'x after the 1st layer of attention: {x.shape}')
         if deep:
             x = self.resid1(x)
@@ -278,8 +309,10 @@ class StereoPvn3d(keras.Model):
         x_skip = x
 
         x, w = self.attention2([f_l_4,f_r_4],w)
+        attention.append(x)
+
         print(f'x after the 2st layer of attention: {x.shape}')
-        x = tf.concat([x, x_skip], axis=-1) #cut the concat and put it in the disparity layer? non avrebbe senso. Forse bisogna cambiare
+        x = tf.concat([x, x_skip, w[-1]], axis=-1) #cut the concat and put it in the disparity layer? non avrebbe senso. Forse bisogna cambiare
         
 
         x = self.resred1(x)
@@ -298,8 +331,10 @@ class StereoPvn3d(keras.Model):
             f_r_3],
             previous_weights=w
         )
+        attention.append(x)
+
         print(f'x after the 3st layer of attention: {x.shape}')
-        x = tf.concat([x, x_skip], axis=-1)
+        x = tf.concat([x, x_skip, w[-1]], axis=-1)
         print(f'x after the concat: {x.shape}')
    
         x = self.resred2(x)
@@ -314,11 +349,13 @@ class StereoPvn3d(keras.Model):
 
         x_skip = x
 
-        x, w= self.attention4(
+        x, w = self.attention4(
             [f_l_2, f_r_2], previous_weights=w,
         )
+        attention.append(x)
+
         print(f'x after the 4st layer of attention: {x.shape}')
-        x = tf.concat([x, x_skip], axis=-1)
+        x = tf.concat([x, x_skip, w[-1]], axis=-1)
         print(f'x after the concat: {x.shape}')
 
         x = self.resred3(x)
@@ -338,8 +375,9 @@ class StereoPvn3d(keras.Model):
             f_r_1],
             previous_weights=w,
         )
+        attention.append(x)
         print(f'x after the 5st layer of attention: {x.shape}')
-        x = tf.concat([x, x_skip], axis=-1)
+        x = tf.concat([x, x_skip, w[-1]], axis=-1)
         print(f'x after the concat: {x.shape}')
 
         x = self.resred4(x)
@@ -349,14 +387,14 @@ class StereoPvn3d(keras.Model):
         x = self.resid13(x)
         x = self.resid14(x)
         x = self.resid15(x)
-        # before_head = x
+        before_head = x
 
         
 
         
         x = self.head1(x)
         x = self.bn(x)
-        x = self.leaky_relu(x)
+        x = self.relu(x)
         stereo_outputs = self.head2(x)
         #print(f"stereo_outputs.shape: {stereo_outputs.shape} - stereo_outputs: {stereo_outputs}")
 
@@ -375,27 +413,64 @@ class StereoPvn3d(keras.Model):
             return adj_outputs
         else:
             if self.use_disparity:
-                disp = tf.nn.relu(stereo_outputs[..., :1])
+                disp = tf.nn.leaky_relu(stereo_outputs[..., :1])
+
                 # print('disp after stereo atention', disp)
                 if self.relative_disparity:
                     disp = (
                         disp * tf.shape(inputs[0])[2]
                     )  # BHWC -> *W converts to absolute disparity
+                
                 y = baseline * focal_length
-                #print(y)
+                print(f'baseline {baseline} - baseline.type {type(baseline)} - baseline dtype {baseline.dtype}')
+                print(f'focal_length {focal_length} - focal_length.type {type(focal_length)} - focal_length dtype {focal_length.dtype}')
+
+                print(f'y {y}')
                 depth = tf.math.divide_no_nan(y, disp)
                 #print('depth after math divide no nan', depth)
-                depth = tf.clip_by_value(depth, 0.0, 50.0)
+                #depth = tf.clip_by_value(depth, 0.0, 100.0)
                 #print('depth after clip by value', depth)
                 #stereo_seg = tf.concat([depth, stereo_outputs[..., 1:7]], axis=-1) #H x W x (1 + n_cls)
                 stereo_outputs = tf.concat([depth, stereo_outputs[..., 1:]], axis=-1, name="final_concat") #H x W x (n_features)
             else:
-                depth = stereo_outputs[..., :1]
-        xyz_pred = self.pcld_processor_tf_by_index(depth, intrinsics, sampled_inds_in_roi)
+                disp = self.disp_head(stereo_outputs)
+                disp = tf.where(disp>0, disp+1, tf.math.exp(disp))
+
+                # depth = tf.math.sigmoid(depth)
+                # stereo_outputs = tf.concat([depth, stereo_outputs[..., 1:]], axis=-1, name="final_concat")
+
+        y = (baseline * focal_length) / tf.cast(crop_factor, tf.float32)
+        depth = tf.math.divide_no_nan(y, disp)
+        # depth = tf.clip_by_value(depth, 0.05, 100.0)
+        xyz_pred = self.pcld_processor_tf_by_index(depth+0.00001, intrinsics, sampled_inds_in_roi)
+        # xyz_pred = tf.ones_like(xyz_pred)
+        # xyz_pred = tf.stop_gradient(xyz_pred)
+
+
+        # Define Sobel filter kernels
+        # sobel_x = tf.expand_dims(tf.expand_dims(self.sobel_x, axis=2), axis=3)
+        # sobel_y = tf.expand_dims(tf.expand_dims(self.sobel_y, axis=2), axis=3)
+        # # print(f'sobel_x: {sobel_x} - sobel_x shape {sobel_x.shape} ')
+        # # Apply Sobel filter in the x-direction using convolution
+        # sobel_x_der = tf.nn.conv2d(depth, sobel_x, strides=[1, 1, 1, 1], padding='SAME')
+
+        # # Apply Sobel filter in the y-direction using convolution
+        # sobel_y_der = tf.nn.conv2d(depth, sobel_y, strides=[1, 1, 1, 1], padding='SAME')
+
+        # # Compute the gradient magnitude (norm)
+        # gradient_magnitude = tf.sqrt(tf.square(sobel_x_der) + tf.square(sobel_y_der))
+        # print(f'gradient_magnitude {gradient_magnitude.shape}')
+        # gradient_magnitude = tf.zeros_like(depth)
+        gradient_magnitude = stereo_outputs[..., 1:2]
+
+
+        # Normalize the gradient magnitude (optional)
+        # normalized_magnitude = tf.cast(255.0 * gradient_magnitude / tf.reduce_max(gradient_magnitude), tf.float32)
+
+
+
         # xyz_pred = tf.ones_like(xyz_pred)
         print(f'xyz_pred {xyz_pred}')
-
-        crop_factor = False
 
         # rgb_emb = match_choose_adp(self.n_rgbd_feats, sampled_index, crop_factor, stereo_outputs.shape)
         #print('Before match_choose ...')
@@ -403,25 +478,32 @@ class StereoPvn3d(keras.Model):
 
         #print(f"sampled_inds_in_roi.shape: {sampled_inds_in_roi.shape}")
 
-        rgb_emb = tf.gather_nd(stereo_outputs, sampled_inds_in_roi)
+        rgb_emb = tf.gather_nd(stereo_outputs[..., 1:], sampled_inds_in_roi)
+
+        print(f'len of sampled index {sampled_inds_in_original_image.shape[1]}')
         #rgb_emb = match_choose(stereo_outputs, sampled_inds_in_roi)
 
-        #print(f"rgb_emb.shape: {rgb_emb.shape} - rgb_emb: {rgb_emb}")
+        print(f"rgb_emb.shape: {rgb_emb.shape} - rgb_emb: {rgb_emb}")
 
-        #print('rgb_emb after match_choose', rgb_emb)
+        print('rgb_emb ', rgb_emb)
         camera_scale = 1
-        feats_fused = rgb_emb
+
+        feats_fused = tf.concat([xyz_pred, rgb_emb], axis = -1)
+
+        
         
         kp, sm, cp = self.mlp_model(feats_fused, training=training)
+        # tf.print(f'tf.math.reduce_mean(kp) {tf.math.reduce_mean(kp).numpy()}')
+
         if training:
-            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w)
+            return (disp, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head )
         else:
             batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz_pred, kp, cp, sm, mesh_kpts])
             return (
                 batch_R,
                 batch_t,
                 voted_kpts,
-                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w)
+                (disp, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head)
             )
 
     # @tf.function
@@ -464,42 +546,42 @@ class StereoPvn3d(keras.Model):
         return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
 
 
-    #@tf.function
-    def test_step(self, data):
-        print(f"data: {data}")
+    # #@tf.function
+    # def test_step(self, data):
+    #     print(f"data: {data}")
 
-        x = data[0]
-        print(f"x: {x}")
-        y = data[1]
-        print(f"y: {y}")
-        batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
-        y_pred = self(x, training=False)
+    #     x = data[0]
+    #     print(f"x: {x}")
+    #     y = data[1]
+    #     print(f"y: {y}")
+    #     batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
+    #     y_pred = self(x, training=False)
 
-        gt_sm = y[1]
-        pred_sm = y_pred[2]
+    #     gt_sm = y[1]
+    #     pred_sm = y_pred[2]
 
-        loss = self.loss(y, y_pred)
-        loss = loss #/ batch_size
-        self.custom_metric.update_state(y, y_pred)
-        dictionary_metrics = self.custom_metric.result()
+    #     loss = self.loss(y, y_pred)
+    #     loss = loss #/ batch_size
+    #     self.custom_metric.update_state(y, y_pred)
+    #     dictionary_metrics = self.custom_metric.result()
         
-        mlse_metric = dictionary_metrics.get("depth_mlse")
-        mse_metric = dictionary_metrics.get("depth_mse")
-        mae_metric = dictionary_metrics.get("depth_mae")
-        ssim_metric = dictionary_metrics.get("depth_ssim")
-        kp_l1_metric = dictionary_metrics.get("kp_l1")
-        cp_l1_metric = dictionary_metrics.get("cp_l1")
-        segmentation_crossentropy = self.segmentation_metric(gt_sm, pred_sm)
+    #     mlse_metric = dictionary_metrics.get("depth_mlse")
+    #     mse_metric = dictionary_metrics.get("depth_mse")
+    #     mae_metric = dictionary_metrics.get("depth_mae")
+    #     ssim_metric = dictionary_metrics.get("depth_ssim")
+    #     kp_l1_metric = dictionary_metrics.get("kp_l1")
+    #     cp_l1_metric = dictionary_metrics.get("cp_l1")
+    #     segmentation_crossentropy = self.segmentation_metric(gt_sm, pred_sm)
 
 
-        return {"loss": loss,
-                'depth_mlse':mlse_metric,
-                "depth_mse":mse_metric,
-                "depth_mae":mae_metric,
-                "depth_ssim":ssim_metric,
-                    "kp_l1":kp_l1_metric,
-                    "cp_l1":cp_l1_metric,
-                    "segmentation_crossentropy":segmentation_crossentropy}
+    #     return {"loss": loss,
+    #             'depth_mlse':mlse_metric,
+    #             "depth_mse":mse_metric,
+    #             "depth_mae":mae_metric,
+    #             "depth_ssim":ssim_metric,
+    #                 "kp_l1":kp_l1_metric,
+    #                 "cp_l1":cp_l1_metric,
+    #                 "segmentation_crossentropy":segmentation_crossentropy}
 
 
     @staticmethod
