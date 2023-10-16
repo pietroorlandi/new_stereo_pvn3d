@@ -286,6 +286,8 @@ class StereoPvn3d(keras.Model):
         f_l_1, f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(cropped_rgbs_l)
         f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
 
+        before_head = f_r_5
+
         deep = True
         attention = []
         # x, w, w_1 = self.attention1(f_l_5, f_r_5)
@@ -387,7 +389,7 @@ class StereoPvn3d(keras.Model):
         x = self.resid13(x)
         x = self.resid14(x)
         x = self.resid15(x)
-        before_head = x
+        
 
         
 

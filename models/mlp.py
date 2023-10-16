@@ -34,7 +34,8 @@ class MlpNets:
             filters=self.params.kp_conv1d_3_dim, kernel_size=1, activation='relu', name="kp_conv1d_3")(conv1d_2)
         conv1d_4 = Conv1D(
             filters=self.num_kpts * self.channel_xyz, kernel_size=1, activation=None, name="kp_conv1d_4")(conv1d_3)
-
+        # print(f'conv1d_4 {conv1d_4}')
+        # print(f'num_points {self.num_pts}')
         kp_pre = tf.reshape(conv1d_4, shape=[-1, self.num_pts, self.num_kpts, self.channel_xyz])
         return kp_pre
 

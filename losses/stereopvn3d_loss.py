@@ -252,7 +252,8 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # Get data
         [gt_depth, gt_RT, gt_mask, gt_disp] = y_true_list[0], y_true_list[1], y_true_list[2], y_true_list[3]
         gt_mask = tf.expand_dims(gt_mask, axis=-1) # better to move this to simpose.py
-        
+        cropped_rgb_l, cropped_rgb_r = y_pred_list[8], y_pred_list[9]
+        norm_bbox = y_pred_list[7]
         # depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, normalized_magnitude
         [pred_depth, pred_kp, pred_sm, pred_cp] = y_pred_list[0], y_pred_list[1], y_pred_list[2], y_pred_list[3]
         print(f'In loss call pred_depth = pred[2] {tf.math.reduce_mean(pred_depth).numpy()}')
@@ -262,6 +263,11 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         xyz_pred, sampled_inds, mesh_kpts, norm_bbox = y_pred_list[4], y_pred_list[5], y_pred_list[6],  y_pred_list[7]
         print(f'In Loss call xyz_pred {tf.math.reduce_mean(xyz_pred).numpy()}')
         print(f'In Loss call sampled_inds {tf.math.reduce_mean(sampled_inds).numpy()}')
+        print(f'In Loss call cropped_rgb_l {tf.math.reduce_mean(cropped_rgb_l).numpy()}')
+        print(f'In Loss call cropped_rgb_r {tf.math.reduce_mean(cropped_rgb_r).numpy()}')
+        print(f'In Loss call norm_bbox {norm_bbox}')
+       
+
         w = y_pred_list[10]
         intrinsics = y_pred_list[12]
         crop_factor = y_pred_list[13]

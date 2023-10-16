@@ -429,8 +429,8 @@ class TrainE2E(cvde.job.Job):
                 vis_vectors_gt = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_vectors_gt
                 )
 
-                vis_vectors_hybrid = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_offset_pred
-                )
+                # vis_vectors_hybrid = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_offset_pred
+                # )
 
 
                 vis_vectors = self.draw_keypoint_vectors(
@@ -444,8 +444,8 @@ class TrainE2E(cvde.job.Job):
                 )
 
                 # assemble images side-by-side
-                vis_vectors = np.concatenate([vis_vectors, vis_vectors_gt, vis_vectors_hybrid], axis=1)
-                self.tracker.log(f"RGB (vectors) ({i})", vis_vectors, index=epoch)
+                # vis_vectors = np.concatenate([vis_vectors, vis_vectors_gt, vis_vectors_hybrid], axis=1)
+                # self.tracker.log(f"RGB (vectors) ({i})", vis_vectors, index=epoch)
 
 
                 vis_w1 = self.draw_weights(w1)
