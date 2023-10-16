@@ -10,3 +10,5 @@ log/
 .local/
 checkpoints/**
 *.png
+*.out
+.vscode
