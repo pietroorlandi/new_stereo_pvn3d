@@ -517,7 +517,7 @@ class _6IMPOSE(_Dataset):
 
         px_count = lambda x: x["px_count_valid"]
         objs = sorted(objs, key=px_count, reverse=True)
-        print(f"objs: {objs}")
+        #print(f"objs: {objs}")
         # print(f"before filter - len(objs): {len(objs)} - objs: {objs}")
 
         # if len(objs)<=1:

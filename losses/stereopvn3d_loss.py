@@ -39,10 +39,8 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         self,
         resnet_input_shape,
         mse_loss_discount,
-        l1_loss_discount,
         ssim_loss_discount,
         mlse_loss_discount,
-        seg_loss_discount,
         ssim_max_val,
         ssim_filter_size,
         ssim_k1,
@@ -50,8 +48,8 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         kp_loss_discount,
         cp_loss_discount,
         sm_loss_discount,
-        kp_cp_loss_discount,
-        kp_cp_ofst_loss_discount,
+        deriv_loss_discount,
+        hessian_loss_discount,
         distribute_training=False,
 
         **kwargs
@@ -59,10 +57,8 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         super().__init__()
         self.resnet_input_shape = resnet_input_shape
         self.mse_loss_discount = mse_loss_discount
-        self.l1_loss_discount = l1_loss_discount
         self.ssim_loss_discount = ssim_loss_discount
         self.mlse_loss_discount = mlse_loss_discount
-        self.seg_loss_discount = seg_loss_discount
         self.ssim_max_val = ssim_max_val
         self.ssim_filter_size = ssim_filter_size
         self.ssim_k1 = ssim_k1
@@ -71,8 +67,8 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         self.kp_loss_discount = kp_loss_discount
         self.cp_loss_discount = cp_loss_discount
         self.sm_loss_discount = sm_loss_discount
-        self.kp_cp_loss_discount = kp_cp_loss_discount
-        self.kp_cp_ofst_loss_discount = kp_cp_ofst_loss_discount
+        self.deriv_loss_discount = deriv_loss_discount
+        self.hessian_loss_discount = hessian_loss_discount
         self.distribute_training = distribute_training
         self.seg_from_logits = True
         self.reduction = tf.keras.losses.Reduction.NONE if self.distribute_training else tf.keras.losses.Reduction.AUTO
@@ -145,49 +141,23 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # abs_diff = tf.multiply(tf.math.abs(diff), w)
         # in_loss = abs_diff
         # l1_loss =tf.reduce_sum(in_loss) / (num_nonzero + 1e-3)
-        print(f'In Loss l1 call kp = pred[1] {tf.math.reduce_mean(pred_ofst).numpy()}')
-        print(f'In Loss l1 call kp = targ[1] {tf.math.reduce_mean(targ_ofst).numpy()}')
+        # print(f'In Loss l1 call kp = pred[1] {tf.math.reduce_mean(pred_ofst).numpy()}')
+        # print(f'In Loss l1 call kp = targ[1] {tf.math.reduce_mean(targ_ofst).numpy()}')
         diff = tf.math.abs(pred_ofst - targ_ofst)  # (b, n_pts, n_kpts, 3)
-        print(f'In Loss l1 call diff {tf.math.reduce_mean(diff).numpy()}')
+        # print(f'In Loss l1 call diff {tf.math.reduce_mean(diff).numpy()}')
 
         mask = tf.cast(mask_labels[:, :, tf.newaxis, :], tf.float32)  # (b, n_pts, 1, 3)
-        print(f'In Loss l1 call mask {tf.math.reduce_mean(mask).numpy()}')
+        #print(f'In Loss l1 call mask {tf.math.reduce_mean(mask).numpy()}')
 
         masked_diff = diff * mask
-        print(f'In Loss l1 call masked_diff {tf.math.reduce_mean(masked_diff).numpy()}')
+        #print(f'In Loss l1 call masked_diff {tf.math.reduce_mean(masked_diff).numpy()}')
 
         num_on_object = tf.math.reduce_sum(tf.cast(mask_labels, tf.float32))
-        print(f'num_on_object {num_on_object}')
+        #print(f'num_on_object {num_on_object}')
         loss = tf.math.reduce_mean(masked_diff)/(tf.math.reduce_mean(mask))# tf.reduce_sum(masked_diff) / (1e-5 + num_on_object)
         print(f'loss {loss}')
 
         return loss
-
-
-
-    def loss_pvn_ktps(self, kp_cp_ofst_pre, kp_cp_ofst_target, kp_cp_pre, kp_cp_target, seg_pre, label, mask_label):
-        """
-        :param kp_cp_ofst_pre:
-        :param kp_cp_ofst_target:
-        :param kp_cp_pre:
-        :param kp_cp_target:
-        :param seg_pre: One-shot encoding for pixel-wise semantics
-        :param label:
-        :param mask_label:
-        :param target_cls:
-        :return:
-        """
-        loss_kp_cp_ofst = self.l1_loss(pred_ofst=kp_cp_ofst_pre, targ_ofst=kp_cp_ofst_target, mask_labels=mask_label)
-        seg_pre = tf.unstack(seg_pre, axis=2)[1]
-        label = tf.argmax(label, axis=2)
-        loss_seg = self.BinaryFocalLoss(label, seg_pre)  # return batch-wise loss
-        loss_kp_cp = self.l1_loss_kp_cp(kp_cp_pre, kp_cp_target)
-
-        loss = self.params.kp_cp_ofst_loss_discount * loss_kp_cp_ofst + \
-                self.params.sm_loss_discount * loss_seg + \
-                self.params.kp_cp_loss_discount * loss_kp_cp
-
-        return loss, loss_kp_cp_ofst, loss_seg, loss_kp_cp
 
 
     def ssim_loss(self, y_true, y_pred):        
@@ -256,15 +226,17 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         norm_bbox = y_pred_list[7]
         # depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, normalized_magnitude
         [pred_depth, pred_kp, pred_sm, pred_cp] = y_pred_list[0], y_pred_list[1], y_pred_list[2], y_pred_list[3]
+        print(f"statistics gt_depth: mean: {tf.math.reduce_mean(gt_depth)} - min: {tf.math.reduce_min(gt_depth)} - max: {tf.math.reduce_max(gt_depth)} - std: {tf.math.reduce_std(gt_depth)}")
+        print(f"statistics gt_disp: mean: {tf.math.reduce_mean(gt_disp)} - min: {tf.math.reduce_min(gt_disp)} - max: {tf.math.reduce_max(gt_disp)} - std: {tf.math.reduce_std(gt_disp)}")
         print(f'In loss call pred_depth = pred[2] {tf.math.reduce_mean(pred_depth).numpy()}')
-        print(f'In loss call pred_sm = pred[2] {tf.math.reduce_mean(pred_sm).numpy()}')
-        print(f'In loss call pred_cp = pred[3] {tf.math.reduce_mean(pred_cp).numpy()}')
-        print(f'In Loss call kp = pred[1] {tf.math.reduce_mean(pred_kp).numpy()}')
+        # print(f'In loss call pred_sm = pred[2] {tf.math.reduce_mean(pred_sm).numpy()}')
+        # print(f'In loss call pred_cp = pred[3] {tf.math.reduce_mean(pred_cp).numpy()}')
+        # print(f'In Loss call kp = pred[1] {tf.math.reduce_mean(pred_kp).numpy()}')
         xyz_pred, sampled_inds, mesh_kpts, norm_bbox = y_pred_list[4], y_pred_list[5], y_pred_list[6],  y_pred_list[7]
         print(f'In Loss call xyz_pred {tf.math.reduce_mean(xyz_pred).numpy()}')
-        print(f'In Loss call sampled_inds {tf.math.reduce_mean(sampled_inds).numpy()}')
-        print(f'In Loss call cropped_rgb_l {tf.math.reduce_mean(cropped_rgb_l).numpy()}')
-        print(f'In Loss call cropped_rgb_r {tf.math.reduce_mean(cropped_rgb_r).numpy()}')
+        print(f'In Loss call sampled_inds {tf.shape(sampled_inds).numpy()}')
+        print(f'In Loss call cropped_rgb_l {tf.shape(cropped_rgb_l).numpy()}')
+        print(f'In Loss call cropped_rgb_r {tf.shape(cropped_rgb_r).numpy()}')
         print(f'In Loss call norm_bbox {norm_bbox}')
        
 
@@ -272,7 +244,11 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         intrinsics = y_pred_list[12]
         crop_factor = y_pred_list[13]
         before_head = y_pred_list[14]
-        print(f'In Loss call before_head {tf.math.reduce_mean(before_head).numpy()}')
+        print(f'In Loss call f_l_5 0 {tf.math.reduce_mean(before_head[0]).numpy()}')
+        print(f'In Loss call f_l_5 1 {tf.math.reduce_mean(before_head[1]).numpy()}')
+        print(f'In Loss call f_l_5 2 {tf.math.reduce_mean(before_head[2]).numpy()}')
+        print(f'In Loss call f_l_5 3 {tf.math.reduce_mean(before_head[3]).numpy()}')
+
         # pred_derivative = y_pred_list[12]
         xyz_gt = self.pcld_processor_tf_by_index(gt_depth+0.0001, intrinsics, sampled_inds)
 
@@ -317,7 +293,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # print(f"shape gt_kp: {gt_kp.shape} - dtype: {gt_kp.dtype}")
         # print(f"shape pred_kp: {pred_kp.shape} - dtype: {pred_kp.dtype}")
         # print(f"shape gt_cp: {gt_cp.shape} - dtype: {gt_cp.dtype}")
-        # print(f"shape pred_cp: {pred_cp.shape} - dtype: {pred_cp.dtype}")
+        # print(f"shape pred_cp: {pred_cp.shape} - dkp_cp_loss_discounttype: {pred_cp.dtype}")
         
         # grad_x_loss = self.mlse(sobel_x_pred, sobel_x_gt)
         # gradx_discount = 0.5
@@ -382,12 +358,12 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
 
         ssim_loss_value = self.ssim_loss(gt_disp, pred_depth_masked)
 
-        xyz_loss = self.mse(xyz_pred, xyz_gt)
+        # xyz_loss = self.mse(xyz_pred, xyz_gt)
         
 
         # pvn3d loss functions
         bs, _, _, _ = pred_kp.shape
-        print(f'In Loss call 2 kp = pred[1] {tf.math.reduce_mean(pred_kp).numpy()}')
+        #print(f'In Loss call 2 kp = pred[1] {tf.math.reduce_mean(pred_kp).numpy()}')
         loss_kp = self.l1_loss(pred_ofst=pred_kp,
                                targ_ofst=gt_kp,
                                mask_labels=mask_selected)
@@ -430,31 +406,31 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         print('loss_mlse', mlse_loss)
         print('loss_deriv', deriv_loss)
         print('loss_hessian', hessian_loss)
-        print('loss_xyz', xyz_loss)
+        # print('loss_xyz', xyz_loss)
 
         #print('loss_l1_dpt', l1_loss)        
 
 
-        loss_cp_scaled = self.cp_loss_discount * loss_cp
+        loss_cp_scaled = self.cp_loss_discount * loss_cp #10 
         loss_kp_scaled = self.kp_loss_discount * loss_kp
         loss_seg_scaled = self.sm_loss_discount * loss_seg
         mse_loss_scaled = self.mse_loss_discount * mse_loss
-        mlse_loss_scaled = self.mlse_loss_discount * mlse_loss
+        mlse_loss_scaled = self.mlse_loss_discount * mlse_loss # 0.000005
         ssim_loss_scaled = self.ssim_loss_discount * ssim_loss_value
-        deriv_loss_scaled = 0.0005 * deriv_loss
-        hessian_loss_scaled = 0.0005 * hessian_loss
-        xyz_loss_scaled = 1 * xyz_loss
+        deriv_loss_scaled = self.deriv_loss_discount * deriv_loss
+        hessian_loss_scaled = self.hessian_loss_discount * hessian_loss
+        # xyz_loss_scaled = 1 * xyz_loss
         
 
         loss = (
             mse_loss_scaled
-            + mlse_loss_scaled
+            # + mlse_loss_scaled
             + ssim_loss_scaled
             + deriv_loss_scaled
-            # + loss_cp_scaled # from pvn3d
-            # + loss_kp_scaled # from pvn3d
-            # + loss_seg_scaled # from pvn3d
-            + hessian_loss_scaled
+            + loss_cp_scaled # from pvn3d
+            + loss_kp_scaled # from pvn3d
+            + loss_seg_scaled # from pvn3d
+            # + hessian_loss_scaled
             # + xyz_loss_scaled
         )
 
@@ -468,7 +444,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
             loss_kp_scaled,
             loss_seg_scaled,
             hessian_loss_scaled,
-            xyz_loss_scaled,
+            #xyz_loss_scaled,
         )
 
 

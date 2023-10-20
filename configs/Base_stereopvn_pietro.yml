@@ -1,6 +1,6 @@
 epochs: 100
 dataset: 6IMPOSE
-num_validate: 3
+num_validate: 4
 #weights: "checkpoints/TrainE2E/model_32" # this is trained on multi
 #weights: "checkpoints/cpsduck (continued)/model_*"
 #weights: "checkpoints/lm_cam (continued)/model_*"
@@ -35,15 +35,15 @@ Val6IMPOSE:
   add_bbox_noise: false
 
 Adam:
-  learning_rate: 0.0005
+  learning_rate: 0.00002
 
 StereoPvn3d:
   resnet_input_shape : [240, 320, 3]
   use_disparity: false
   relative_disparity: false
-  channel_multiplier: 4 # original: 4
+  channel_multiplier: 2 # original: 4
   base_channels: [1,2,4,8,16,32]
-  num_pts: 1500
+  num_pts: 1200
   num_kpt: 8
   num_cls: 1
   num_cpts: 1
@@ -53,10 +53,8 @@ StereoPvn3d:
 StereoPvn3dLoss:
   resnet_input_shape : [240, 320, 3]
   mse_loss_discount: 0.005
-  l1_loss_discount: 0
   ssim_loss_discount: 50
   mlse_loss_discount: 0.000005
-  seg_loss_discount: 0
   ssim_max_val: 1.5
   ssim_filter_size: 11
   ssim_k1: 0.5
@@ -64,8 +62,8 @@ StereoPvn3dLoss:
   kp_loss_discount: 10
   cp_loss_discount: 10
   sm_loss_discount: 10
-  kp_cp_loss_discount: 0
-  kp_cp_ofst_loss_discount: 0
+  deriv_loss_discount: 0.0005
+  hessian_loss_discount: 0.0005
   
 StereoPvn3dMetrics:
   name: "stereo_pvn3d_metrics"

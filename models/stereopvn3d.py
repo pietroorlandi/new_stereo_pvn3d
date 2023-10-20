@@ -69,7 +69,7 @@ class StereoPvn3d(keras.Model):
         self.resnet_input_shape = resnet_input_shape
         self.mlp_params = MlpNetsParams()
         self.custom_metric = StereoPvn3dMetrics()
-        self.initial_pose_model = _InitialPoseModel()
+        
         self.segmentation_metric = tf.keras.metrics.CategoricalCrossentropy(from_logits=True)
         self.base_channels = base_channels
         self.resnet_lr = self.build_resnet(self.channel_multiplier, self.base_channels, self.resnet_input_shape)
@@ -95,7 +95,10 @@ class StereoPvn3d(keras.Model):
         #self.resid4 = ResIdentity(filters=(f14, f24), name="d5_4")
         self.resup1 = ResUp(s=2, filters=(f13, f23), name="d5_5")
         # self.attention2 = StereoAttention(channels=4, width=4, dilation=3)
-        self.resred0 = ResReduce(f24)
+
+
+        # self.resred0 = ResReduce(f24)
+
         self.attention2 = DisparityAttention(max_disparity=3)
         self.resred1 = ResReduce(f24)
         self.resid4 = ResIdentity(filters=(f14, f24), name="d4_1")
@@ -150,7 +153,7 @@ class StereoPvn3d(keras.Model):
             padding="valid",
             kernel_regularizer=tf.keras.regularizers.l2(0.001),
             name="deph_conv_2",
-            activation = 'relu',
+            #activation = 'relu',
         )
 
         self.disp_head = tf.keras.layers.Conv2D(
@@ -180,7 +183,7 @@ class StereoPvn3d(keras.Model):
 
         self.sobel_x = tf.constant([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=tf.float32)
         self.sobel_y = tf.constant([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=tf.float32)
-
+        self.initial_pose_model = _InitialPoseModel()
     # def sample_index_new(self, roi, num_sample_points, bs):
     #     list_b = []
     #     for i in (range(bs)):
@@ -265,13 +268,13 @@ class StereoPvn3d(keras.Model):
             norm_bbox,
             tf.range(tf.shape(full_rgb_l)[0]),
             self.resnet_input_shape[:2],
-        )
+        )/255.
         cropped_rgbs_r = tf.image.crop_and_resize(
             tf.cast(full_rgb_r, tf.float32),
             norm_bbox,
             tf.range(tf.shape(full_rgb_r)[0]),
             self.resnet_input_shape[:2],
-        )
+        )/255.
 
 
 
@@ -286,16 +289,16 @@ class StereoPvn3d(keras.Model):
         f_l_1, f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(cropped_rgbs_l)
         f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
 
-        before_head = f_r_5
+        before_head = f_l_5
 
         deep = True
         attention = []
         # x, w, w_1 = self.attention1(f_l_5, f_r_5)
         x, w = self.attention1([f_l_5, f_r_5])
-        x = tf.concat([x, w[-1]], axis=-1)
+        # x = tf.concat([x, w[-1]], axis=-1)
         attention.append(x)
 
-        x = self.resred0(x)
+        # x = self.resred0(x)
 
 
         print(f'x after the 1st layer of attention: {x.shape}')
@@ -435,8 +438,8 @@ class StereoPvn3d(keras.Model):
                 #stereo_seg = tf.concat([depth, stereo_outputs[..., 1:7]], axis=-1) #H x W x (1 + n_cls)
                 stereo_outputs = tf.concat([depth, stereo_outputs[..., 1:]], axis=-1, name="final_concat") #H x W x (n_features)
             else:
-                disp = self.disp_head(stereo_outputs)
-                disp = tf.where(disp>0, disp+1, tf.math.exp(disp))
+                disp = stereo_outputs[...,:1] # self.disp_head(stereo_outputs)
+                # disp = tf.where(disp>0, disp+1, tf.math.exp(disp))
 
                 # depth = tf.math.sigmoid(depth)
                 # stereo_outputs = tf.concat([depth, stereo_outputs[..., 1:]], axis=-1, name="final_concat")
@@ -876,7 +879,7 @@ class StereoPvn3d(keras.Model):
         x_5 = x
 
         output = [x_1, x_2, x_3, x_4, x_5]
-        model = keras.Model(inputs=input, outputs=output, name="resnet_model")
+        model = keras.Model(inputs=input, outputs=output, name=f"{name}_model")
 
         return model
 
