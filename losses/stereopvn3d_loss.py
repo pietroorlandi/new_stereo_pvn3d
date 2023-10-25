@@ -288,7 +288,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         print(f'gt_disp {tf.shape(gt_disp)} - w factor inv {tf.shape(w_factor_inv)}')
 
         w_factor_inv = tf.reshape(w_factor_inv, [-1, 1 ,1, 1])
-        gt_disp =gt_disp * w_factor_inv # tf.cast(crop_factor, tf.float32)
+        gt_disp = gt_disp * w_factor_inv # tf.cast(crop_factor, tf.float32)
         print(f'gt_disp {tf.shape(gt_disp)} - w factor inv {tf.shape(w_factor_inv)}')
         gt_disp = gt_disp[..., :1]
         
