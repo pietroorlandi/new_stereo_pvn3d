@@ -82,7 +82,7 @@ class TrainE2E(cvde.job.Job):
             for x, y in train_set_tf:
                 if self.is_stopped():
                     return
-                print(f'steps: {cumulative_steps*4} -  {cumulative_steps*4 +1} - {cumulative_steps*4 +2} - {cumulative_steps*4 +3} ')
+                #print(f'steps: {cumulative_steps*4} -  {cumulative_steps*4 +1} - {cumulative_steps*4 +2} - {cumulative_steps*4 +3} ')
                 gt_depth = y[0]
                 #self.image_index+=1
                 baseline = x[2]
@@ -128,8 +128,8 @@ class TrainE2E(cvde.job.Job):
                     weights_resnet_encoder = model.get_layer('resnet_model').get_weights()[0]
                     print(f"statistics weights resnet encoder: max: {tf.math.reduce_max(weights_resnet_encoder)} - min: {tf.math.reduce_min(weights_resnet_encoder)} - mean: {tf.math.reduce_mean(weights_resnet_encoder)} - std: {tf.math.reduce_std(weights_resnet_encoder)} - nan: {tf.math.reduce_any(tf.math.is_nan(weights_resnet_encoder))}")
 
-                    if cumulative_steps%100 == 0:
-                        self.log_visualization(cumulative_steps//100)
+                    if cumulative_steps%500 == 0:
+                        self.log_visualization(cumulative_steps//500)
 
 
                     cumulative_steps+=1
@@ -140,7 +140,8 @@ class TrainE2E(cvde.job.Job):
                     print(f"number of corrupted batch until now: {number_samples_corrupted}")
 
             bar.close()
-            model.save(f"checkpoints/{self.tracker.name}/model_{epoch:02}", save_format="tf")
+            model.save(f"checkpoints/{self.tracker.name}/model_{epoch:03}", save_format="tf")
+            print(f"Saved model for epoch {epoch:03}")
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
@@ -211,8 +212,8 @@ class TrainE2E(cvde.job.Job):
                 b_R,
                 b_t,
                 b_kpts_pred,
-                (b_depth_pred, b_kp_offset_pred, b_seg_pred, b_cp_offset_pred, b_xyz_pred, b_sampled_inds_in_original_image, b_mesh_kpts, b_norm_bbox, b_cropped_rgbs_l, b_cropped_rgbs_r, b_weights, b_attention, b_intrinsics_matrix, b_crop_factor, _),) = self.model(x, training=False)
-            # b_depth_pred, b_kp_offset_pred, b_mask_selected_pred, b_cp_offset_pred, b_norm_bbox = self.model(x, training=False)
+                (b_depth_pred, b_kp_offset_pred, b_seg_pred, b_cp_offset_pred, b_xyz_pred, b_sampled_inds_in_original_image, b_mesh_kpts, b_norm_bbox, b_cropped_rgbs_l, b_cropped_rgbs_r, b_weights, b_attention, 
+                 b_intrinsics_matrix, b_crop_factor, _, b_w_factor_inv, b_h_factor_inv, b_disp_pred),) = self.model(x, training=False)
             print(f'In log_visual kp = pred[1] {tf.math.reduce_mean(b_kp_offset_pred).numpy()}')
             h, w = tf.shape(b_rgb)[1], tf.shape(b_rgb)[2]
 
@@ -227,12 +228,25 @@ class TrainE2E(cvde.job.Job):
             crop_h, crop_w = b_depth_pred.shape[1:3]
         
             # crop_depth_gt = full_depth_gt[y1:y2, x1:x2]
+            y = b_baseline * b_intrinsics[:,0,0]
+            y = tf.reshape(y, [-1, 1, 1, 1])
+            b_disp_gt = tf.math.divide_no_nan(y, b_depth_gt)
+
             b_depth_gt = tf.image.crop_and_resize(
                 tf.cast(b_depth_gt, tf.float32),
                 b_norm_bbox,
                 tf.range(tf.shape(b_depth_gt)[0]),
                 [crop_h, crop_w]
             )
+            b_disp_gt = tf.image.crop_and_resize(
+                tf.cast(b_disp_gt, tf.float32),
+                b_norm_bbox,
+                tf.range(tf.shape(b_depth_gt)[0]),
+                [crop_h, crop_w]
+            )
+            b_w_factor_inv = tf.reshape(b_w_factor_inv, [-1, 1, 1, 1])
+            b_disp_gt = b_disp_gt * b_w_factor_inv
+
 
             # roi
             px_max_disp = 200
@@ -268,6 +282,9 @@ class TrainE2E(cvde.job.Job):
             b_intrinsics = b_intrinsics.numpy()
             b_depth_pred = b_depth_pred.numpy()
             b_depth_gt = b_depth_gt.numpy()
+            b_disp_gt = b_disp_gt.numpy()
+            b_disp_pred = b_disp_pred.numpy()
+            print(f'b_disp shape{b_disp_pred.shape} - b disp gt shape{b_disp_gt.shape}')
             # b_xyz_gt = b_xyz_gt.numpy()
             #b_crop_factor = b_crop_factor.numpy()
 
@@ -365,6 +382,8 @@ class TrainE2E(cvde.job.Job):
                 R_hybrid,
                 t_hybrid,
                 kpts_pred_hybrid,
+                disp_pred,
+                disp_gt,
                 w1,
                 w2,
                 w3,
@@ -403,6 +422,8 @@ class TrainE2E(cvde.job.Job):
                 b_R_hybrid,
                 b_t_hybrid,
                 b_kpts_pred_hybrid,
+                b_disp_pred,
+                b_disp_gt,
                 batch_w1,
                 batch_w2,
                 batch_w3,
@@ -431,9 +452,11 @@ class TrainE2E(cvde.job.Job):
                 vis_seg = self.draw_segmentation(rgb.copy(), sampled_inds, seg_pred, roi)
                 self.tracker.log(f"RGB ({i})", vis_seg, index=epoch)
                 
-                print(f'crop_depth_pred {crop_depth_pred.shape} - crop_depth_gt {crop_depth_gt.shape} ')
                 vis_depth = self.draw_depth(crop_depth_pred, crop_depth_gt)
                 self.tracker.log(f"Depth ({i})", vis_depth, index=epoch)
+
+                vis_disp = self.draw_disp(disp_pred, disp_gt)
+                self.tracker.log(f"Disp ({i})", vis_disp, index=epoch)
 
                 self.tracker.log(f"RGB R (crop) ({i})", (crop_rgb_r*255.).astype(np.uint8), index=epoch)
                 self.tracker.log(f"RGB L (crop) ({i})", (crop_rgb*255.).astype(np.uint8), index=epoch)
@@ -585,6 +608,8 @@ class TrainE2E(cvde.job.Job):
         a = np.concatenate([scaled_image, scaled_image, scaled_image], axis=-1)
         # print('scaled image after concat', a.shape)
         im = (a*255).astype(np.uint8)
+        im = np.clip(im, 0, 255)
+        print(f"statistic pred_depth plot: min:{np.min(im)} - max: {np.max(im)} - mean: {np.mean(im)} - std: {np.std(im)}")
         #return cv2.cvtColor(scaled_image, cv2.COLOR_GRAY2RGB)
 
         #cv2.imwrite('pred_depth.png', crop_depth_pred *255/5)
@@ -594,7 +619,9 @@ class TrainE2E(cvde.job.Job):
 
         colored_gt = color_depth(crop_depth_gt)
         # colored_pred = color_depth(crop_depth_pred)
-        colored_pred = cv2.applyColorMap(im, cv2.COLORMAP_JET)
+        # crop_depth_pred = np.clip(crop_depth_pred, 0 ,255).astype(np.uint8)# 
+        # crop_depth_pred = cv2.normalize(crop_depth_pred, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+        colored_pred = color_depth(crop_depth_pred)
 
         assembled[:, :w, :] = colored_gt
         assembled[:, w:w*2, :] = colored_pred
@@ -605,6 +632,42 @@ class TrainE2E(cvde.job.Job):
         # print(f"assembled.shape: {assembled.shape}")
 
         return assembled
+    
+    def draw_disp(self, crop_depth_pred, crop_depth_gt):
+        h, w = crop_depth_pred.shape[:2]
+        assembled = np.zeros((h, 3 * w, 3), dtype=np.uint8)
+        # crop_depth_pred = np.clip(0.0, 5.0)
+        #scaled_image = np.clip(((crop_depth_pred/5) * 255),0,255).astype(np.uint8)
+        scaled_image = (crop_depth_pred - np.mean(crop_depth_pred)) / (np.max(crop_depth_pred) - np.min(crop_depth_pred)) #(img_data - np.min(img_data)) / (np.max(img_data) - np.min(img_data)) and (img_data_normalized * 255).astype(np.uint8)
+        # print(f'scaled_image.shape {scaled_image.shape}')
+        a = np.concatenate([scaled_image, scaled_image, scaled_image], axis=-1)
+        # print('scaled image after concat', a.shape)
+        im = (a*255).astype(np.uint8)
+        im = np.clip(im, 0, 255)
+        print(f"statistic pred_depth plot: min:{np.min(im)} - max: {np.max(im)} - mean: {np.mean(im)} - std: {np.std(im)}")
+        #return cv2.cvtColor(scaled_image, cv2.COLOR_GRAY2RGB)
+
+        #cv2.imwrite('pred_depth.png', crop_depth_pred *255/5)
+        color_depth = lambda d: cv2.applyColorMap(
+            cv2.convertScaleAbs(d, alpha=255 / 200), cv2.COLORMAP_JET
+        )
+
+        colored_gt = color_depth(crop_depth_gt)
+        # colored_pred = color_depth(crop_depth_pred)
+        # crop_depth_pred = np.clip(crop_depth_pred, 0 ,255).astype(np.uint8)# 
+        # crop_depth_pred = cv2.normalize(crop_depth_pred, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+        colored_pred = color_depth(crop_depth_pred)
+
+        assembled[:, :w, :] = colored_gt
+        assembled[:, w:w*2, :] = colored_pred
+        assembled[:, w*2:, :] = im
+
+        # print(f"crop_depth_pred.shape: {crop_depth_pred.shape}")
+        # print(f"crop_depth_gt.shape: {crop_depth_gt.shape}")
+        # print(f"assembled.shape: {assembled.shape}")
+
+        return assembled
+
 
     def draw_object_mesh(self, rgb, roi, mesh_vertices, mesh_vertices_gt):
         h, w = rgb.shape[:2]
@@ -784,6 +847,7 @@ class TrainE2E(cvde.job.Job):
                     cv2.convertScaleAbs(d, alpha=255), cv2.COLORMAP_JET
                 )
         h_att, w_att, channels = attention[:,:,:].shape[:3]
+        print(f"attention weights min: {np.min(attention)} - max :{np.min(attention)} - mean: {np.mean(attention)} - std: {np.std(attention)}")
 
         assembled_att1 = np.zeros((h_att, np.min([channels, 7]) * w_att, 3), dtype=np.uint8)
         for i in range(channels):

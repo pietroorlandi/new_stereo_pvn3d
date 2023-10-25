@@ -7,8 +7,8 @@
 # from sklearn.neighbors import NearestNeighbors
 
 # import cvde
-# # from models.pvn3d_e2e import PVN3D_E2E
-# # from losses.pvn_loss import PvnLoss
+# from models.stereopvn3d import StereoPvn3d
+# from losses.stereopvn3d_loss import StereoPvn3dLoss
 
 # from datasets.blender import ValBlender
 # from datasets.simpose import Val6IMPOSE
@@ -20,70 +20,50 @@
 #         job_cfg = self.config
 
 #         self.num_validate = job_cfg["num_validate"]
-#         blender_config = job_cfg["ValBlender"]
 #         simpose_config = job_cfg["Val6IMPOSE"]
 
-#         # model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
+#         model = StereoPvn3d(**job_cfg["StereoPvn3d"])
 
-#         # datasets = {}
+#         datasets = {}
 
-#         # eval_len = lambda x: len(x) // x.batch_size
+#         eval_len = lambda x: len(x) // x.batch_size
 
-#         # with tf.device("/cpu:0"):
-#         #     if "ValBlender" in job_cfg["datasets"]:
-#         #         try:
-#         #             blender = ValBlender(**blender_config)
-#         #             blender_tf = blender.to_tf_dataset()
-#         #             datasets["blender"] = (blender_tf, eval_len(blender))
-#         #             self.mesh_vertices = blender.mesh_vertices
-#         #         except Exception as e:
-#         #             print("Blender dataset not found, skipping...")
-#         #             print(e)
+#         with tf.device("/cpu:0"):
+#             if "Val6IMPOSE" in job_cfg["datasets"]:
+#                 try:
+#                     simpose = Val6IMPOSE(**simpose_config)
+#                     simpose_tf = simpose.to_tf_dataset()
+#                     datasets["simpose"] = (simpose_tf, eval_len(simpose))
+#                     self.mesh_vertices = simpose.mesh_vertices
+#                 except Exception as e:
+#                     print("Simpose dataset not found, skipping...")
+#                     print(e)
 
-#         #     if "Val6IMPOSE" in job_cfg["datasets"]:
-#         #         try:
-#         #             simpose = Val6IMPOSE(**simpose_config)
-#         #             simpose_tf = simpose.to_tf_dataset()
-#         #             datasets["simpose"] = (simpose_tf, eval_len(simpose))
-#         #             self.mesh_vertices = simpose.mesh_vertices
-#         #         except Exception as e:
-#         #             print("Simpose dataset not found, skipping...")
-#         #             print(e)
 
-#         #     if "LineMOD" in job_cfg["datasets"]:
-#         #         try:
-#         #             linemod = LineMOD(**job_cfg["LineMOD"])
-#         #             linemod_tf = linemod.to_tf_dataset()
-#         #             datasets["linemod"] = (linemod_tf, eval_len(linemod))
-#         #             self.mesh_vertices = linemod.mesh_vertices
 
-#         #         except Exception as e:
-#         #             print("LineMOD dataset not found, skipping...")
-#         #             print(e)
+#         pairwise_distance = np.linalg.norm(
+#             self.mesh_vertices[None, :, :] - self.mesh_vertices[:, None, :], axis=-1
+#         )
+#         self.object_diameter = np.max(pairwise_distance)
 
-#         # pairwise_distance = np.linalg.norm(
-#         #     self.mesh_vertices[None, :, :] - self.mesh_vertices[:, None, :], axis=-1
-#         # )
-#         # self.object_diameter = np.max(pairwise_distance)
+#         path = Path(job_cfg["weights"])
+#         path = str(sorted(list(path.parent.glob(path.name)))[-1].resolve())
+#         print("Loading weights from: ", path)
+#         model.load_weights(path)
 
-#         # path = Path(job_cfg["weights"])
-#         # path = str(sorted(list(path.parent.glob(path.name)))[-1].resolve())
-#         # print("Loading weights from: ", path)
-#         # model.load_weights(path)
+#         loss_fn = StereoPvn3dLoss(**job_cfg["StereoPvn3dLoss"])
 
-#         # loss_fn = PvnLoss(**job_cfg["PvnLoss"])
+#         for name, (dataset_tf, length) in datasets.items():
+#             loss_vals = self.eval(name, model, dataset_tf, length, loss_fn)
+#             if loss_vals is None:
+#                 return
+#             res = self.get_visualization(name, model, dataset_tf)
+#             if res == "abort":
+#                 return
+#             for k, v in loss_vals.items():
+#                 self.tracker.log(f"{name}_{k}", v, 0)
 
-#         # for name, (dataset_tf, length) in datasets.items():
-#         #     loss_vals = self.eval(name, model, dataset_tf, length, loss_fn)
-#         #     if loss_vals is None:
-#         #         return
-#         #     res = self.get_visualization(name, model, dataset_tf)
-#         #     if res == "abort":
-#         #         return
-#         #     for k, v in loss_vals.items():
-#         #         self.tracker.log(f"{name}_{k}", v, 0)
-
-#     def get_visualization(self, name: str, model: PVN3D_E2E, dataset_tf):
+#     def get_visualization(self, name: str, model: StereoPvn3d, dataset_tf):
 #         i = 0
 #         bar = tqdm(total=self.num_validate, desc=f"Visualizing {name}")
 #         for x, y in dataset_tf.take(self.num_validate):

@@ -529,7 +529,7 @@ class DisparityAttention(tf.keras.layers.Layer):
         # add also the computed new weights, multiplied by 2 
         new_previous_weights.append(weights)
 
-        print(f'weights.shape {weights.shape}')
+        #print(f'weights.shape {weights.shape}')
 
         # batch, height, width, _ = tf.shape(right_image)
         attended_right = tf.zeros_like(right_image)
