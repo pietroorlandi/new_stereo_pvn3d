@@ -1,7 +1,7 @@
 epochs: 100
 dataset: 6IMPOSE
-num_validate: 4
-#weights: "checkpoints/TrainE2E/model_00" # this is trained on multi
+num_validate: 5
+#weights: "checkpoints/TrainE2E_Base_stereopvn_pietro/model_000" # this is trained on multi
 #weights: "checkpoints/cpsduck (continued)/model_*"
 #weights: "checkpoints/lm_cam (continued)/model_*"
 #weights: "checkpoints/lm_cam (no-seg loss)/model_*"
@@ -10,7 +10,7 @@ num_validate: 4
 shared: &shared
   # cutoff: 200
   cls_type: cpsduck
-  # root: "/home/porlandi/Documents/Dataset/single_img_dataset"
+  #root: "/home/porlandi/Documents/Dataset/single_img_dataset"
   root: "/home/porlandi/Documents/data"
   batch_size: 8
   use_cache: True
@@ -35,7 +35,7 @@ Val6IMPOSE:
   add_bbox_noise: false
 
 Adam:
-  learning_rate: 0.0002
+  learning_rate: 0.0001
 
 StereoPvn3d:
   resnet_input_shape : [144, 192, 3]
@@ -55,12 +55,12 @@ StereoPvn3dLoss:
   mse_loss_discount: 0.05
   ssim_loss_discount: 50
   mlse_loss_discount: 0.000005
-  ssim_max_val: 1.5
+  ssim_max_val: 5
   ssim_filter_size: 11
   ssim_k1: 0.5
   ssim_k2: 1.5
-  kp_loss_discount: 10
-  cp_loss_discount: 10
+  kp_loss_discount: 30
+  cp_loss_discount: 30
   sm_loss_discount: 10
   deriv_loss_discount: 0.0000
   hessian_loss_discount: 0.0000

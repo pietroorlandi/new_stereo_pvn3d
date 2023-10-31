@@ -2,6 +2,7 @@ import tensorflow as tf
 import focal_loss
 from skimage.metrics import structural_similarity as ssim
 from models.stereopvn3d import StereoPvn3d
+from models.pprocessnet import _InitialPoseModel
 import numpy as np
 import cv2
 
@@ -74,11 +75,11 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         self.seg_from_logits = True
         self.reduction = tf.keras.losses.Reduction.NONE if self.distribute_training else tf.keras.losses.Reduction.AUTO
         self.BinaryFocalLoss = focal_loss.BinaryFocalLoss(gamma=2, from_logits=True)
-
         red = tf.keras.losses.Reduction.NONE
         self.i =0
         self.mse = tf.keras.losses.MeanSquaredError()
         self.mlse = tf.keras.losses.MeanSquaredLogarithmicError()
+        self.mae = tf.keras.losses.MeanAbsoluteError()
         #self.l1 = tf.keras.losses.Huber(reduction=red)
         # self.seg_loss = focal_loss.SparseCategoricalFocalLoss(
         #     2, from_logits=True, reduction=red
@@ -93,31 +94,6 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         self.sobel_x = tf.expand_dims(tf.expand_dims(self.sobel_x, axis=2), axis=3)
         self.sobel_y = tf.expand_dims(tf.expand_dims(self.sobel_y, axis=2), axis=3)
 
-    # def pcld_processor_tf_by_index(self, b_depth_pred, b_camera_matrix, b_sampled_index):
-    #     h_depth = tf.shape(b_depth_pred)[1]
-    #     w_depth = tf.shape(b_depth_pred)[2]
-    #     x_map, y_map = tf.meshgrid(
-    #         tf.range(w_depth, dtype=tf.int32), tf.range(h_depth, dtype=tf.int32)
-    #     )
-
-    #     # calculate xyz
-    #     cam_cx, cam_cy = b_camera_matrix[:, 0, 2], b_camera_matrix[:, 1, 2]
-    #     cam_fx, cam_fy = b_camera_matrix[:, 0, 0], b_camera_matrix[:, 1, 1]
-
-    #     # inds[..., 0] == index into batch
-    #     # inds[..., 1:] == index into y_map and x_map,  b times
-    #     sampled_ymap = tf.gather_nd(y_map, b_sampled_index[:, :, 1:])  # [b, num_points]
-    #     sampled_xmap = tf.gather_nd(x_map, b_sampled_index[:, :, 1:])  # [b, num_points]
-    #     sampled_ymap = tf.cast(sampled_ymap, tf.float32)
-    #     sampled_xmap = tf.cast(sampled_xmap, tf.float32)
-
-    #     # z = tf.gather_nd(roi_depth, inds)  # [b, num_points]
-    #     z = tf.gather_nd(b_depth_pred[..., 0], b_sampled_index)  # [b, num_points]
-    #     x = (sampled_xmap - cam_cx[:, tf.newaxis]) * z / cam_fx[:, tf.newaxis]
-    #     y = (sampled_ymap - cam_cy[:, tf.newaxis]) * z / cam_fy[:, tf.newaxis]
-    #     xyz = tf.stack((x, y, z), axis=-1)
-
-    #     return xyz
 
 
     def l1_loss_kp_cp(self, kp_cp_pre, kp_cp_targ):
@@ -155,7 +131,8 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
 
         num_on_object = tf.math.reduce_sum(tf.cast(mask_labels, tf.float32))
         #print(f'num_on_object {num_on_object}')
-        loss = tf.math.reduce_mean(masked_diff)/(tf.math.reduce_mean(mask))# tf.reduce_sum(masked_diff) / (1e-5 + num_on_object)
+        # loss = tf.math.reduce_mean(masked_diff)/(tf.math.reduce_mean(mask)) 
+        loss = tf.reduce_sum(masked_diff) / (1e-5 + num_on_object) # lukas loss
         print(f'loss {loss}')
 
         return loss
@@ -219,7 +196,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         cp_offsets = offsets[:, :, -1:, :]  # [b, n_pts, 1, 3]
         return kp_offsets, cp_offsets
 
-    def call(self, y_true_list, y_pred_list):
+    def call(self, y_true_list, y_pred_list, s1, s2, s3, s4, s5):
         # Get data
         [gt_depth, gt_RT, gt_mask, gt_disp] = y_true_list[0], y_true_list[1], y_true_list[2], y_true_list[3]
         gt_mask = tf.expand_dims(gt_mask, axis=-1) # better to move this to simpose.py
@@ -234,14 +211,16 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # print(f'In loss call pred_cp = pred[3] {tf.math.reduce_mean(pred_cp).numpy()}')
         # print(f'In Loss call kp = pred[1] {tf.math.reduce_mean(pred_kp).numpy()}')
         xyz_pred, sampled_inds, mesh_kpts, norm_bbox = y_pred_list[4], y_pred_list[5], y_pred_list[6],  y_pred_list[7]
-        print(f'In Loss call xyz_pred {tf.math.reduce_mean(xyz_pred).numpy()}')
-        print(f'In Loss call sampled_inds {tf.shape(sampled_inds).numpy()}')
-        print(f'In Loss call cropped_rgb_l {tf.shape(cropped_rgb_l).numpy()}')
-        print(f'In Loss call cropped_rgb_r {tf.shape(cropped_rgb_r).numpy()}')
+        #print(f"statistic sampled_inds: mean: {tf.math.reduce_mean(tf.cast(sampled_inds, dtype=tf.float32))} - std: {tf.math.reduce_std(tf.cast(sampled_inds, dtype=tf.float32))}")
+        # print(f'In Loss call xyz_pred {tf.math.reduce_mean(xyz_pred).numpy()}')
+        # print(f'In Loss call sampled_inds {tf.shape(sampled_inds).numpy()}')
+        # print(f'In Loss call cropped_rgb_l {tf.shape(cropped_rgb_l).numpy()}')
+        # print(f'In Loss call cropped_rgb_r {tf.shape(cropped_rgb_r).numpy()}')
         print(f'In Loss call norm_bbox {norm_bbox}')
         
 
         w = y_pred_list[10]
+        intrinsics = y_pred_list[12]
         intrinsics = y_pred_list[12]
         crop_factor = y_pred_list[13]
         before_head = y_pred_list[14]
@@ -261,7 +240,10 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # print(f"pred_depth shape: {pred_depth.shape} - dtype: {pred_depth.dtype} - pred_depth min: {tf.math.reduce_min(pred_depth)} - pred_depth max: {tf.math.reduce_max(pred_depth)} ")  
 
         # Processing data to compare gt and pred
+        #mask_valid_inds = sampled_inds>=0
         mask_selected = tf.gather_nd(gt_mask, sampled_inds)
+        #mask_selected = tf.cast(mask_selected, dtype=tf.float32)
+        #mask_selected = StereoPvn3d.replace_values_seg_of_invalid_indices(mask_selected, sampled_inds, value=0.)
         gt_kp, gt_cp = self.get_offst(
             gt_RT,
             xyz_gt,
@@ -295,6 +277,15 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
 
         print(f"statistics after crop gt_depth: mean: {tf.math.reduce_mean(gt_depth)} - min: {tf.math.reduce_min(gt_depth)} - max: {tf.math.reduce_max(gt_depth)} - std: {tf.math.reduce_std(gt_depth)}")
         print(f"statistics after crop gt_disp: mean: {tf.math.reduce_mean(gt_disp)} - min: {tf.math.reduce_min(gt_disp)} - max: {tf.math.reduce_max(gt_disp)} - std: {tf.math.reduce_std(gt_disp)}")
+        # print(f"statistics gt_kp per batch: mean: {tf.math.reduce_mean(gt_kp, axis=[1,2,3])} - std: {tf.math.reduce_std(gt_kp, axis=[1,2,3])} - max: {tf.math.reduce_max(gt_kp, axis=[1,2,3])} - min: {tf.math.reduce_min(gt_kp, axis=[1,2,3])} - num_nonzeros: {tf.math.count_nonzero(gt_kp, axis=[1,2,3])}")
+        # print(f"statistics pred_kp per batch: mean: {tf.math.reduce_mean(pred_kp, axis=[1,2,3])} - std: {tf.math.reduce_std(pred_kp, axis=[1,2,3])} - max: {tf.math.reduce_max(pred_kp, axis=[1,2,3])} - min: {tf.math.reduce_min(pred_kp, axis=[1,2,3])} - num_nonzeros: {tf.math.count_nonzero(pred_kp, axis=[1,2,3])}")
+        self.initial_pose_model = _InitialPoseModel()
+
+        b_R_pred, b_t_pred, b_voted_kpts_pred = self.initial_pose_model([xyz_gt, pred_kp, pred_cp, pred_sm, mesh_kpts])
+
+        print(f"b_voted_kpts_pred[0,0,:]: {b_voted_kpts_pred[0,0,:]}")
+        print(f"b_mesh_kpts[0,0,:]: {mesh_kpts[0,0,:]}")
+        
         # pred_depth_masked = pred_depth * tf.cast(gt_mask, tf.float32)
         pred_depth_masked = tf.where(gt_depth>0.0001, pred_depth, 0.0)
         # print(f"shape gt_depth: {gt_depth.shape} - dtype: {gt_depth.dtype}")
@@ -362,7 +353,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         mse_loss = self.mse(gt_depth, pred_depth_masked)
         # mlse_loss = self.mlse(gt_depth, pred_depth)
 
-        mse_disp_loss = self.mse(gt_disp, disp_pred)
+        mse_disp_loss = self.mae(gt_disp, disp_pred)
 
         # loss = square(log(y_true + 1.) - log(y_pred + 1.))
 
@@ -409,14 +400,14 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
 
 
         '''Print all losses for debugging:'''
-        print("-------------------\nLoss PVN3D")
+        print("-------------------\nLoss PVN3D before apply discounts")
 
         print('loss_kp', loss_kp)
         print('loss_seg', loss_seg)
         print('loss_cp', loss_cp)
-        print('loss_ssim', ssim_loss_value)
-        print('loss_mse', mse_loss)
-        print('loss_mlse', mlse_loss)
+        print('loss ssim disp', ssim_disp_loss_value)
+        print('loss_mse_disp', mse_disp_loss)
+        print('loss_mlse_disp', mlse_disp_loss)
         print('loss_deriv', deriv_loss)
         print('loss_hessian', hessian_loss)
         # print('loss_xyz', xyz_loss)
@@ -424,25 +415,32 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         #print('loss_l1_dpt', l1_loss)        
 
 
-        loss_cp_scaled = self.cp_loss_discount * loss_cp #10 
-        loss_kp_scaled = self.kp_loss_discount * loss_kp
-        loss_seg_scaled = self.sm_loss_discount * loss_seg
-        mse_loss_scaled = self.mse_loss_discount * mse_disp_loss
+        # loss_cp_scaled = self.cp_loss_discount * loss_cp #10 
+        loss_cp_scaled = 1./(2.*tf.math.exp(s4*2)) * loss_cp 
+        # loss_kp_scaled = self.kp_loss_discount * loss_kp
+        loss_kp_scaled = 1./(2.*tf.math.exp(s3*2)) * loss_kp 
+        # loss_seg_scaled = self.sm_loss_discount * loss_seg
+        loss_seg_scaled = 1./(tf.math.exp(s5*2)) * loss_seg 
+        # mse_loss_scaled = self.mse_loss_discount * mse_disp_loss
+        mse_loss_scaled = 1./(2.*tf.math.exp(s1*2)) * mse_disp_loss 
         mlse_loss_scaled = self.mlse_loss_discount * mlse_disp_loss # 0.000005
-        ssim_loss_scaled = self.ssim_loss_discount * ssim_disp_loss_value
+        #ssim_loss_scaled = self.ssim_loss_discount * ssim_disp_loss_value
+        ssim_loss_scaled = 1./(2.*tf.math.exp(s2*2) )* ssim_disp_loss_value 
         deriv_loss_scaled = self.deriv_loss_discount * deriv_loss
         hessian_loss_scaled = self.hessian_loss_discount * hessian_loss
         # xyz_loss_scaled = 1 * xyz_loss
+
+        
         
 
         loss = (
-            mse_loss_scaled
-            + mlse_loss_scaled
-            + ssim_loss_scaled
-            + deriv_loss_scaled
-            + loss_cp_scaled # from pvn3d
-            + loss_kp_scaled # from pvn3d
-            + loss_seg_scaled # from pvn3d
+            mse_loss_scaled + tf.math.maximum(s1, 0.0)
+            #+ mlse_loss_scaled
+            + ssim_loss_scaled + tf.math.maximum(s2, 0.0)
+            # + deriv_loss_scaled
+            + loss_cp_scaled + tf.math.maximum(s4, 0.0) # from pvn3d
+            + loss_kp_scaled + tf.math.maximum(s3, 0.0) # from pvn3d
+            + loss_seg_scaled + tf.math.maximum(s5, 0.0) # from pvn3d
             # + hessian_loss_scaled
             # + xyz_loss_scaled
         )

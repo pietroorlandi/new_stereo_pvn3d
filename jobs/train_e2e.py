@@ -29,6 +29,7 @@ class TrainE2E(cvde.job.Job):
         print(f"job_cfg['StereoPvn3d']: {job_cfg['StereoPvn3d']}")
         
         self.model = model = StereoPvn3d(**job_cfg["StereoPvn3d"])
+        # print('model.alpha1', model.alpha1)
         # self.loss = StereoPvn3dLoss(**job_cfg["StereoPvn3dLoss"])
 
         if job_cfg["dataset"] == 'blender':
@@ -65,10 +66,10 @@ class TrainE2E(cvde.job.Job):
         num_epochs = job_cfg["epochs"]
         train_set_tf = train_set.to_tf_dataset()
         val_set_tf = val_set.to_tf_dataset()
+            
         cumulative_steps = 0
         number_samples_corrupted = 0 # for statistics on dataset
-        
-
+        frequency_plot_results = 500
         
         for epoch in range(num_epochs):
             bar = tqdm(
@@ -98,13 +99,18 @@ class TrainE2E(cvde.job.Job):
                     with tf.GradientTape() as tape:
                         pred = model(x, training=True)
                         #b_cropped_l = pred[8]
-                        print(f'len of sampled index {pred[5].shape[1]}')
-                        print(f'kp = pred[1] {tf.math.reduce_mean(pred[1]).numpy()}')
-                        loss_combined, mse_loss, mlse_loss, ssim_loss, deriv_loss, loss_cp, loss_kp, loss_seg, loss_he = loss_fn.call(y, pred) # , loss_pcld
+                        # print(f'len of sampled index {pred[5].shape[1]}')
+                        # print(f'kp = pred[1] {tf.math.reduce_mean(pred[1]).numpy()}')
+                        loss_combined, mse_loss, mlse_loss, ssim_loss, deriv_loss, loss_cp, loss_kp, loss_seg, loss_he = loss_fn.call(y, pred, model.s1, model.s2, model.s3, model.s4, model.s5) # , loss_pcld
                         print(f'loss_combined before applying backprop {loss_combined}')
                     gradients = tape.gradient(loss_combined, model.trainable_variables)
                     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
+                    print('s1: ', model.s1)
+                    print('s2: ', model.s2)
+                    print('s3: ', model.s3)
+                    print('s4: ', model.s4)
+                    print('s5: ', model.s5)
                     loss_vals["loss"] = loss_vals.get("loss", []) + [loss_combined.numpy()]
                     loss_vals["mse_loss"] = loss_vals.get("mse_loss", []) + [mse_loss.numpy()]
                     loss_vals["mlse_loss"] = loss_vals.get("mlse_loss", []) + [mlse_loss.numpy()]
@@ -125,12 +131,11 @@ class TrainE2E(cvde.job.Job):
                     )
                     if cumulative_steps == 0:
                         print(f"Summary of the model: {model.summary()}")
-                    weights_resnet_encoder = model.get_layer('resnet_model').get_weights()[0]
-                    print(f"statistics weights resnet encoder: max: {tf.math.reduce_max(weights_resnet_encoder)} - min: {tf.math.reduce_min(weights_resnet_encoder)} - mean: {tf.math.reduce_mean(weights_resnet_encoder)} - std: {tf.math.reduce_std(weights_resnet_encoder)} - nan: {tf.math.reduce_any(tf.math.is_nan(weights_resnet_encoder))}")
+                    #weights_resnet_encoder = model.get_layer('resnet_model').get_weights()[0]
+                    #print(f"statistics weights resnet encoder: max: {tf.math.reduce_max(weights_resnet_encoder)} - min: {tf.math.reduce_min(weights_resnet_encoder)} - mean: {tf.math.reduce_mean(weights_resnet_encoder)} - std: {tf.math.reduce_std(weights_resnet_encoder)} - nan: {tf.math.reduce_any(tf.math.is_nan(weights_resnet_encoder))}")
 
-                    if cumulative_steps%500 == 0:
-                        self.log_visualization(cumulative_steps//500)
-
+                    if cumulative_steps%frequency_plot_results == 0:
+                        self.log_visualization(cumulative_steps//frequency_plot_results)
 
                     cumulative_steps+=1
                 else:
@@ -140,16 +145,19 @@ class TrainE2E(cvde.job.Job):
                     print(f"number of corrupted batch until now: {number_samples_corrupted}")
 
             bar.close()
+
             model.save(f"checkpoints/{self.tracker.name}/model_{epoch:03}", save_format="tf")
             print(f"Saved model for epoch {epoch:03}")
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
                 self.tracker.log(f"train_{k}", loss_vals[k], epoch)
+            
 
             # self.log_visualization(epoch)
 
             loss_vals = {}
+            corrupted_batch_validation = 0
             print(' Start validation phase ---------------------------------------------------------------')
             for x, y in tqdm(
                 val_set_tf,
@@ -157,28 +165,34 @@ class TrainE2E(cvde.job.Job):
                 total=len(val_set) // val_set.batch_size,
             ):
 
-                _, _, _, pred = model(x, training=False)
-                print(f"len(pred): {len(pred)}")
+                
+                #print(f"len(pred): {len(pred)}")
 
-                # pred = model(x, training=True)
-                # resnet_input_shape = pred[0].shape[1:3]
-                # gt_depth = tf.image.crop_and_resize(
-                #     tf.cast(y[0], tf.float32),
-                #     pred[7],
-                #     tf.range(tf.shape(y[0])[0]),
-                #     resnet_input_shape
-                # )
-                # y = (gt_depth, y[1], y[2])
                 gt_depth = y[0]
                 baseline = x[2]
                 K = x[3][0]
                 focal_length = K[0,0]
-                gt_disp = tf.math.divide_no_nan(baseline * focal_length, gt_depth)
-                y = (y[0], y[1], y[2], gt_disp)
+                b_roi = x[4]
 
-                l = loss_fn.call(y, pred)
-                for k, v in zip(["loss","mse_loss","mlse_loss", "ssim_loss", "deriv_loss", "loss_cp", "loss_kp", "loss_seg", "loss_he"], l): # , "loss_pcld"
-                    loss_vals[k] = loss_vals.get(k, []) + [v]
+                batch_is_valid = tf.reduce_all(tf.reduce_all(tf.not_equal(b_roi, 0), axis=1)) # avoid cases where roi == (0,0,0,0)
+                if batch_is_valid:
+    
+                    gt_disp = tf.math.divide_no_nan(baseline * focal_length, gt_depth)
+                    y = (y[0], y[1], y[2], gt_disp)
+                    _, _, _, pred = model(x, training=False)
+                    loss_combined, mse_loss, mlse_loss, ssim_loss, deriv_loss, loss_cp, loss_kp, loss_seg, loss_he = loss_fn.call(y, pred, model.s1, model.s2, model.s3, model.s4, model.s5)
+                    loss_vals["loss"] = loss_vals.get("loss", []) + [loss_combined.numpy()]
+                    loss_vals["mse_loss"] = loss_vals.get("mse_loss", []) + [mse_loss.numpy()]
+                    loss_vals["mlse_loss"] = loss_vals.get("mlse_loss", []) + [mlse_loss.numpy()]
+                    loss_vals["ssim_loss"] = loss_vals.get("ssim_loss", []) + [ssim_loss.numpy()]
+                    loss_vals["deriv_loss"] = loss_vals.get("deriv_loss", []) + [deriv_loss.numpy()]
+                    loss_vals["loss_cp"] = loss_vals.get("loss_cp", []) + [loss_cp.numpy()]
+                    loss_vals["loss_kp"] = loss_vals.get("loss_kp", []) + [loss_kp.numpy()]
+                    loss_vals["loss_seg"] = loss_vals.get("loss_seg", []) + [loss_seg.numpy()]
+                    loss_vals["loss_he"] = loss_vals.get("loss_he", []) + [loss_he.numpy()]
+                else:
+                    corrupted_batch_validation+=1
+            print(f"total number of corrupted_batch_validation: {corrupted_batch_validation}")
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
@@ -250,9 +264,9 @@ class TrainE2E(cvde.job.Job):
 
             # roi
             px_max_disp = 200
-            print('VAL ----- b_roi before px_max_disp ', b_roi)
+            # print('VAL ----- b_roi before px_max_disp ', b_roi)
             b_roi = tf.stack([b_roi[:, 0], tf.math.maximum(tf.zeros_like(b_roi[:, 1]), tf.math.subtract(b_roi[:,1], px_max_disp)), b_roi[:, 2], b_roi[:, 3]], axis = -1)
-            print('VAL ----- b_roi after px_max_disp ', b_roi)
+            # print('VAL ----- b_roi after px_max_disp ', b_roi)
 
             # attention weights
             [batch_w1, batch_w2, batch_w3, batch_w4, batch_w5] = b_weights
@@ -284,7 +298,7 @@ class TrainE2E(cvde.job.Job):
             b_depth_gt = b_depth_gt.numpy()
             b_disp_gt = b_disp_gt.numpy()
             b_disp_pred = b_disp_pred.numpy()
-            print(f'b_disp shape{b_disp_pred.shape} - b disp gt shape{b_disp_gt.shape}')
+            #print(f'b_disp shape{b_disp_pred.shape} - b disp gt shape{b_disp_gt.shape}')
             # b_xyz_gt = b_xyz_gt.numpy()
             #b_crop_factor = b_crop_factor.numpy()
 
@@ -455,7 +469,7 @@ class TrainE2E(cvde.job.Job):
                 vis_depth = self.draw_depth(crop_depth_pred, crop_depth_gt)
                 self.tracker.log(f"Depth ({i})", vis_depth, index=epoch)
 
-                vis_disp = self.draw_disp(disp_pred, disp_gt)
+                vis_disp = self.draw_depth(disp_pred, disp_gt, alpha=1.275)
                 self.tracker.log(f"Disp ({i})", vis_disp, index=epoch)
 
                 self.tracker.log(f"RGB R (crop) ({i})", (crop_rgb_r*255.).astype(np.uint8), index=epoch)
@@ -463,7 +477,6 @@ class TrainE2E(cvde.job.Job):
 
                 vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices_hybrid, mesh_vertices_gt)
                 self.tracker.log(f"RGB (mesh) ({i})", vis_mesh, index=epoch)
-
 
                 # print(f'kpts_gt {kpts_gt} - kpts_gt {kpts_gt.shape}')
                 # print(f'kpts_pred {kpts_pred} - kpts_pred {kpts_pred.shape}')
@@ -478,7 +491,7 @@ class TrainE2E(cvde.job.Job):
                     roi,
                     offsets_pred,
                     sampled_inds,
-                    kpts_pred,
+                    kpts_gt,
                     seg=seg_pred,
                     radius=int(crop_factor),
                 )
@@ -488,7 +501,7 @@ class TrainE2E(cvde.job.Job):
                     roi,
                     offsets_pred,
                     sampled_inds,
-                    kpts_pred_hybrid,
+                    kpts_gt,
                     seg=seg_pred,
                     radius=int(crop_factor),
                 )
@@ -499,7 +512,6 @@ class TrainE2E(cvde.job.Job):
                     offsets_gt,
                     sampled_inds,
                     kpts_gt,
-
                     radius=1 #int(crop_factor),
                 )
 
@@ -507,14 +519,6 @@ class TrainE2E(cvde.job.Job):
                 # assemble images side-by-side
                 vis_offsets = np.concatenate([vis_offsets, vis_offsets_gt, vis_offsets_hybrid], axis=1)
                 self.tracker.log(f"RGB (offsets) ({i})", vis_offsets, index=epoch)
-
-
-                vis_vectors_gt = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_vectors_gt
-                )
-
-                vis_vectors_hybrid = self.draw_keypoint_vectors(rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected_gt, kpts_offset_pred
-                )
-
 
                 vis_vectors = self.draw_keypoint_vectors(
                     rgb.copy(),
@@ -525,6 +529,27 @@ class TrainE2E(cvde.job.Job):
                     kpts_vectors_pred,
                     seg=seg_pred,
                 )
+
+                vis_vectors_gt = self.draw_keypoint_vectors(
+                    rgb.copy(),
+                    roi,
+                    offsets_gt,
+                    kpts_gt,
+                    xyz_projected_gt,
+                    kpts_vectors_gt
+                )
+
+                vis_vectors_hybrid = self.draw_keypoint_vectors(
+                    rgb.copy(),
+                    roi,
+                    offsets_gt,
+                    kpts_gt,
+                    xyz_projected_gt, 
+                    kpts_offset_pred
+                )
+
+
+
 
                 # assemble images side-by-side
                 vis_vectors = np.concatenate([vis_vectors, vis_vectors_gt, vis_vectors_hybrid], axis=1)
@@ -598,11 +623,9 @@ class TrainE2E(cvde.job.Job):
             cv2.circle(rgb, (w_ind, h_ind), 1, color, -1)
         return rgb
     
-    def draw_depth(self, crop_depth_pred, crop_depth_gt):
+    def draw_depth(self, crop_depth_pred, crop_depth_gt, alpha=170.):
         h, w = crop_depth_pred.shape[:2]
         assembled = np.zeros((h, 3 * w, 3), dtype=np.uint8)
-        # crop_depth_pred = np.clip(0.0, 5.0)
-        #scaled_image = np.clip(((crop_depth_pred/5) * 255),0,255).astype(np.uint8)
         scaled_image = (crop_depth_pred - np.mean(crop_depth_pred)) / (np.max(crop_depth_pred) - np.min(crop_depth_pred)) #(img_data - np.min(img_data)) / (np.max(img_data) - np.min(img_data)) and (img_data_normalized * 255).astype(np.uint8)
         # print(f'scaled_image.shape {scaled_image.shape}')
         a = np.concatenate([scaled_image, scaled_image, scaled_image], axis=-1)
@@ -610,11 +633,8 @@ class TrainE2E(cvde.job.Job):
         im = (a*255).astype(np.uint8)
         im = np.clip(im, 0, 255)
         print(f"statistic pred_depth plot: min:{np.min(im)} - max: {np.max(im)} - mean: {np.mean(im)} - std: {np.std(im)}")
-        #return cv2.cvtColor(scaled_image, cv2.COLOR_GRAY2RGB)
-
-        #cv2.imwrite('pred_depth.png', crop_depth_pred *255/5)
         color_depth = lambda d: cv2.applyColorMap(
-            cv2.convertScaleAbs(d, alpha=255 / 1.5), cv2.COLORMAP_JET
+            cv2.convertScaleAbs(d, alpha=alpha), cv2.COLORMAP_JET
         )
 
         colored_gt = color_depth(crop_depth_gt)
@@ -633,41 +653,6 @@ class TrainE2E(cvde.job.Job):
 
         return assembled
     
-    def draw_disp(self, crop_depth_pred, crop_depth_gt):
-        h, w = crop_depth_pred.shape[:2]
-        assembled = np.zeros((h, 3 * w, 3), dtype=np.uint8)
-        # crop_depth_pred = np.clip(0.0, 5.0)
-        #scaled_image = np.clip(((crop_depth_pred/5) * 255),0,255).astype(np.uint8)
-        scaled_image = (crop_depth_pred - np.mean(crop_depth_pred)) / (np.max(crop_depth_pred) - np.min(crop_depth_pred)) #(img_data - np.min(img_data)) / (np.max(img_data) - np.min(img_data)) and (img_data_normalized * 255).astype(np.uint8)
-        # print(f'scaled_image.shape {scaled_image.shape}')
-        a = np.concatenate([scaled_image, scaled_image, scaled_image], axis=-1)
-        # print('scaled image after concat', a.shape)
-        im = (a*255).astype(np.uint8)
-        im = np.clip(im, 0, 255)
-        print(f"statistic pred_depth plot: min:{np.min(im)} - max: {np.max(im)} - mean: {np.mean(im)} - std: {np.std(im)}")
-        #return cv2.cvtColor(scaled_image, cv2.COLOR_GRAY2RGB)
-
-        #cv2.imwrite('pred_depth.png', crop_depth_pred *255/5)
-        color_depth = lambda d: cv2.applyColorMap(
-            cv2.convertScaleAbs(d, alpha=255 / 200), cv2.COLORMAP_JET
-        )
-
-        colored_gt = color_depth(crop_depth_gt)
-        # colored_pred = color_depth(crop_depth_pred)
-        # crop_depth_pred = np.clip(crop_depth_pred, 0 ,255).astype(np.uint8)# 
-        # crop_depth_pred = cv2.normalize(crop_depth_pred, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-        colored_pred = color_depth(crop_depth_pred)
-
-        assembled[:, :w, :] = colored_gt
-        assembled[:, w:w*2, :] = colored_pred
-        assembled[:, w*2:, :] = im
-
-        # print(f"crop_depth_pred.shape: {crop_depth_pred.shape}")
-        # print(f"crop_depth_gt.shape: {crop_depth_gt.shape}")
-        # print(f"assembled.shape: {assembled.shape}")
-
-        return assembled
-
 
     def draw_object_mesh(self, rgb, roi, mesh_vertices, mesh_vertices_gt):
         h, w = rgb.shape[:2]
@@ -847,7 +832,6 @@ class TrainE2E(cvde.job.Job):
                     cv2.convertScaleAbs(d, alpha=255), cv2.COLORMAP_JET
                 )
         h_att, w_att, channels = attention[:,:,:].shape[:3]
-        print(f"attention weights min: {np.min(attention)} - max :{np.min(attention)} - mean: {np.mean(attention)} - std: {np.std(attention)}")
 
         assembled_att1 = np.zeros((h_att, np.min([channels, 7]) * w_att, 3), dtype=np.uint8)
         for i in range(channels):
