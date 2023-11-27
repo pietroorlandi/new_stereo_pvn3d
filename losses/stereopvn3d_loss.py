@@ -217,15 +217,19 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # print(f'In Loss call cropped_rgb_l {tf.shape(cropped_rgb_l).numpy()}')
         # print(f'In Loss call cropped_rgb_r {tf.shape(cropped_rgb_r).numpy()}')
         print(f'In Loss call norm_bbox {norm_bbox}')
+
+
         
 
         w = y_pred_list[10]
-        intrinsics = y_pred_list[12]
         intrinsics = y_pred_list[12]
         crop_factor = y_pred_list[13]
         before_head = y_pred_list[14]
         w_factor_inv, h_factor_inv = y_pred_list[15], y_pred_list[16]
         disp_pred = y_pred_list[17]
+        depth_emb_pred = y_pred_list[18]
+        depth_emb_gt = tf.gather_nd(gt_depth, sampled_inds)
+
         # print(f'In Loss call f_l_5 0 {tf.math.reduce_mean(before_head[0]).numpy()}')
         # print(f'In Loss call f_l_5 1 {tf.math.reduce_mean(before_head[1]).numpy()}')
         # print(f'In Loss call f_l_5 2 {tf.math.reduce_mean(before_head[2]).numpy()}')
@@ -350,7 +354,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         hessian_loss = self.mse(hessian_m, hessian_m_pred)
 
         #l1_loss = self.l1(gt_depth, pred_depth)
-        mse_loss = self.mse(gt_depth, pred_depth_masked)
+        mse_loss = self.mae(gt_depth, pred_depth_masked)
         # mlse_loss = self.mlse(gt_depth, pred_depth)
 
         mse_disp_loss = self.mae(gt_disp, disp_pred)
@@ -394,6 +398,9 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         loss_cp = self.l1_loss(pred_ofst=pred_cp,
                                targ_ofst=gt_cp,
                               mask_labels=mask_selected)
+        
+        depth_emb_loss = self.mae(depth_emb_gt, depth_emb_pred)
+
 
         # if self.params.distribute_training:
         #     loss_seg = tf.reduce_sum(loss_seg) * (1 / bs)
@@ -410,6 +417,8 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         print('loss_mlse_disp', mlse_disp_loss)
         print('loss_deriv', deriv_loss)
         print('loss_hessian', hessian_loss)
+        print('loss_dpt_large_image', mse_loss)
+        print('loss_dpt_emb', depth_emb_loss)
         # print('loss_xyz', xyz_loss)
 
         #print('loss_l1_dpt', l1_loss)        
@@ -431,30 +440,39 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # xyz_loss_scaled = 1 * xyz_loss
 
         
-        
+        # main loss         
 
+        # loss = (
+        #     mse_loss_scaled + tf.math.maximum(s1, 0.0)
+        #     #+ mlse_loss_scaled
+        #     #+ ssim_loss_scaled + tf.math.maximum(s2, 0.0)
+        #     # + deriv_loss_scaled
+        #     + loss_cp_scaled + tf.math.maximum(s4, 0.0) # from pvn3d
+        #     + loss_kp_scaled + tf.math.maximum(s3, 0.0) # from pvn3d
+        #     + loss_seg_scaled + tf.math.maximum(s5, 0.0) # from pvn3d
+        #     # + hessian_loss_scaled
+        #     # + xyz_loss_scaled
+        # )
+
+        # loss for final kp prediction
         loss = (
-            mse_loss_scaled + tf.math.maximum(s1, 0.0)
-            #+ mlse_loss_scaled
-            + ssim_loss_scaled + tf.math.maximum(s2, 0.0)
-            # + deriv_loss_scaled
-            + loss_cp_scaled + tf.math.maximum(s4, 0.0) # from pvn3d
-            + loss_kp_scaled + tf.math.maximum(s3, 0.0) # from pvn3d
-            + loss_seg_scaled + tf.math.maximum(s5, 0.0) # from pvn3d
-            # + hessian_loss_scaled
-            # + xyz_loss_scaled
+            loss_kp
+            + loss_cp
+            + loss_seg
+            + depth_emb_loss
         )
 
         return (
             loss,
-            mse_loss_scaled,
-            mlse_loss_scaled,
-            ssim_loss_scaled,
+            mse_loss,
+            mse_disp_loss,
+            ssim_disp_loss_value,
             deriv_loss_scaled,
-            loss_cp_scaled,
-            loss_kp_scaled,
-            loss_seg_scaled,
-            hessian_loss_scaled,
+            loss_cp,
+            loss_kp,
+            loss_seg,
+            hessian_loss,
+            depth_emb_loss,
             #xyz_loss_scaled,
         )
 

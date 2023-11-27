@@ -479,25 +479,25 @@ class _6IMPOSE(_Dataset):
         return label_list, mask_selected
     
 
-    def choose_index(self, pcld_index):
-        """
-        pcld_index: an array: 1 X N
-        """
-        print(f"len(pcld_index: {len(pcld_index)})")
-        if len(pcld_index) < 400:
-            return None
+    # def choose_index(self, pcld_index):
+    #     """
+    #     pcld_index: an array: 1 X N
+    #     """
+    #     print(f"len(pcld_index: {len(pcld_index)})")
+    #     if len(pcld_index) < 400:
+    #         return None
 
-        pcld_index_id = np.array([i for i in range(len(pcld_index))])
+    #     pcld_index_id = np.array([i for i in range(len(pcld_index))])
 
-        if len(pcld_index_id) > self.n_sample_points:
-            c_mask = np.zeros(len(pcld_index_id), dtype=int)
-            c_mask[:self.n_sample_points] = 1
-            np.random.shuffle(c_mask)
-            pcld_index_id = pcld_index_id[c_mask.nonzero()]
-        else:
-            pcld_index_id = np.pad(pcld_index_id, (0, self.n_sample_points - len(pcld_index_id)), "wrap")
+    #     if len(pcld_index_id) > self.n_sample_points:
+    #         c_mask = np.zeros(len(pcld_index_id), dtype=int)
+    #         c_mask[:self.n_sample_points] = 1
+    #         np.random.shuffle(c_mask)
+    #         pcld_index_id = pcld_index_id[c_mask.nonzero()]
+    #     else:
+    #         pcld_index_id = np.pad(pcld_index_id, (0, self.n_sample_points - len(pcld_index_id)), "wrap")
 
-        return pcld_index_id
+    #     return pcld_index_id
 
 
 class Train6IMPOSE(_6IMPOSE):

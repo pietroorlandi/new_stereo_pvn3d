@@ -74,7 +74,7 @@ class StereoPvn3d(keras.Model):
         # self.alpha4 = tf.Variable(1., trainable = True)
         # self.alpha5 = tf.Variable(1., trainable = True)
         self.s1 = tf.Variable(0., trainable = True) # try to give him less weight, 1.1, try also to focus on the mse by setting 0.9
-        self.s2 = tf.Variable(0., trainable = True)
+        self.s2 = tf.Variable(0., trainable = False)
         self.s3 = tf.Variable(0., trainable = True)
         self.s4 = tf.Variable(0., trainable = True)
         self.s5 = tf.Variable(0., trainable = True)
@@ -442,8 +442,9 @@ class StereoPvn3d(keras.Model):
         # print('depth pred computed from disp', depth)
         #y = (baseline * focal_length) / tf.cast(crop_factor, tf.float32)
         # print(f'w factor inv{w_factor_inv} - h_factor_inv {h_factor_inv} - intrinsics[:, 0, 0] {intrinsics[:, 0, 0]}-' )
-        xyz_pred = self.pcld_processor_tf_by_index(depth+0.00001, intrinsics, sampled_inds_in_roi, w_factor_inv, h_factor_inv) # change focal length for cropped depth
-
+        b_new_intrinsics = self.compute_new_b_intrinsics_camera(bbox, crop_factor, intrinsics)
+        xyz_pred = self.pcld_processor_tf_by_index(depth+0.00001, b_new_intrinsics, sampled_inds_in_roi) # change focal length for cropped depth
+        print(f"xyz_pred mean: {tf.math.reduce_mean(xyz_pred)}")
 
 
         # # Compute the gradient magnitude (norm)
@@ -458,6 +459,9 @@ class StereoPvn3d(keras.Model):
 
         #print(f"sampled_inds_in_roi.shape: {sampled_inds_in_roi.shape}")
         #mask_valid_inds = sampled_inds_in_roi>=0
+        depth_emb = tf.gather_nd(depth, sampled_inds_in_roi)
+
+
         rgb_emb = tf.gather_nd(stereo_outputs[..., 1:], sampled_inds_in_roi) # , tf.where(mask, sampled_inds_in_roi, 0))
         #rgb_emb = tf.where(mask_valid_inds, sampled_inds_in_roi, 0)
 
@@ -478,14 +482,14 @@ class StereoPvn3d(keras.Model):
         # sm = self.replace_values_seg_of_invalid_indices(sm, sampled_inds_in_roi, value=0.)
 
         if training:
-            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head, w_factor_inv, h_factor_inv, disp)
+            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head, w_factor_inv, h_factor_inv, disp, depth_emb)
         else:
             batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz_pred, kp, cp, sm, mesh_kpts])
             return (
                 batch_R,
                 batch_t,
                 voted_kpts,
-                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head, w_factor_inv, h_factor_inv, disp )
+                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head, w_factor_inv, h_factor_inv, disp, depth_emb )
             )
 
 
@@ -718,9 +722,46 @@ class StereoPvn3d(keras.Model):
         y2_new = tf.where(y2_new > in_h, in_h, y2_new)
 
         return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor, tf.cast(1/w_factor, tf.float32), tf.cast(1/h_factor, tf.float32)
+    
+    @staticmethod
+    def compute_new_b_intrinsics_camera(b_roi_cropped, b_crop_factor, b_intrinsics):
+        """
+        Return the new b_intrinsics_camera given the b_roi_cropped and b_crop_factor
+        TODO: check if is right to use b_roi_cropped instead of b_roi_original
+
+        Args:
+            b_roi_cropped: (b, 4): Region of Interest enlarged for stereo crop in the image (y1,x1,y2,x2)
+            b_crop_factor: (b,)
+            b_intrinsics: (b, 3, 3)
+
+        Returns:
+            b_updated_intrinsic_matrix: (b, 3, 3) the new intrinsics matrix considering crop and scaling
+        """
+        cam_cx, cam_cy = b_intrinsics[:, 0, 2], b_intrinsics[:, 1, 2]
+        cam_fx, cam_fy = b_intrinsics[:, 0, 0], b_intrinsics[:, 1, 1]
+
+        b_roi_cropped = tf.cast(b_roi_cropped, dtype=tf.int32)
+        b_roi_cropped[:, 0]
+        y0, x0, y1, x1 = b_roi_cropped[:, 0], b_roi_cropped[:, 1], b_roi_cropped[:, 2], b_roi_cropped[:, 3]
+
+        # Update cx and cy after cropping
+        cam_cx = cam_cx - tf.cast(x0, dtype=tf.float32)
+        cam_cy = cam_cy - tf.cast(y0, dtype=tf.float32)
+
+        # Update cx, cy, fx and fy after scaling
+        cam_cx = cam_cx / tf.cast(b_crop_factor, dtype=tf.float32)
+        cam_cy = cam_cy / tf.cast(b_crop_factor, dtype=tf.float32)
+        cam_fx = cam_fx / tf.cast(b_crop_factor, dtype=tf.float32)
+        cam_fy = cam_fy / tf.cast(b_crop_factor, dtype=tf.float32)
+
+        row1 = tf.expand_dims(tf.stack([cam_fx, b_intrinsics[:,0,1], cam_cx], axis=1), axis=1)
+        row2 = tf.expand_dims(tf.stack([b_intrinsics[:,1,0], cam_fy, cam_cy], axis=1), axis=1)
+        row3 = tf.expand_dims(tf.stack([b_intrinsics[:,2,0], b_intrinsics[:,2,1], b_intrinsics[:,2,2]], axis=1), axis=1)
+        result_matrix = tf.concat([row1, row2, row3], axis=1)
+        return result_matrix
 
     @staticmethod
-    def pcld_processor_tf_by_index(b_depth_pred, b_camera_matrix, b_sampled_index, b_w_factor_inv = 1., b_h_factor_inv = 1.):
+    def pcld_processor_tf_by_index(b_depth_pred, b_camera_matrix, b_sampled_index):
         h_depth = tf.shape(b_depth_pred)[1]
         w_depth = tf.shape(b_depth_pred)[2]
         x_map, y_map = tf.meshgrid(
@@ -729,7 +770,7 @@ class StereoPvn3d(keras.Model):
 
         # calculate xyz
         cam_cx, cam_cy = b_camera_matrix[:, 0, 2], b_camera_matrix[:, 1, 2]
-        cam_fx, cam_fy = b_camera_matrix[:, 0, 0] * b_w_factor_inv, b_camera_matrix[:, 1, 1] * b_h_factor_inv
+        cam_fx, cam_fy = b_camera_matrix[:, 0, 0], b_camera_matrix[:, 1, 1]
 
         # inds[..., 0] == index into batch
         # inds[..., 1:] == index into y_map and x_map,  b times
