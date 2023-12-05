@@ -1,7 +1,7 @@
 epochs: 100
 dataset: 6IMPOSE
 num_validate: 7
-weights: "checkpoints/TrainE2E_Base_stereopvn_pietro/model_011" 
+weights: "checkpoints/TrainE2E_Base_stereopvn_pietro/model_000/" 
 #weights: "checkpoints/cpsduck (continued)/model_*"
 #weights: "checkpoints/lm_cam (continued)/model_*"
 #weights: "checkpoints/lm_cam (no-seg loss)/model_*"
@@ -37,30 +37,50 @@ Val6IMPOSE:
 Adam:
   learning_rate: 0.00008
 
-StereoPvn3d:
-  resnet_input_shape : [144, 192, 3]
-  use_disparity: true
-  relative_disparity: false
-  channel_multiplier: 4 # original: 4
-  base_channels: [1,2,4,8,16,32]
+StereoPvn3dE2E:
   num_pts: 1600
-  num_kpt: 8
+  num_kpts: 8
   num_cls: 1
   num_cpts: 1
   dim_xyz: 3
+  use_disparity: true
+  relative_disparity: false
 
+  res_encoder_params:
+    channel_multiplier: 4
+    base_channels: [1, 2, 4, 8, 16, 32]
+    resnet_input_shape : [144, 192, 3]
+    deep: False
+
+  disp_decoder_params:
+    channel_multiplier: 4 # original: 4
+    base_channels: [1, 2, 4, 8, 16, 32]
+    num_decoder_feats: 600
+
+  point_net2_params:
+    bn: false
+    is_train: true
+    keep_prob: 0.5
+    return_features: true
+    use_tf_interpolation: true
+    use_tfx: false # exclusively tensorflow
+    # n_sample_points: 512
+
+  mlp_params:
+    kp_conv1d_1_dim: 1024
+    kp_conv1d_2_dim: 512
+    kp_conv1d_3_dim: 256
+    cp_conv1d_1_dim: 1024
+    cp_conv1d_2_dim: 512
+    cp_conv1d_3_dim: 128
+    seg_conv1d_1_dim: 1024
+    seg_conv1d_2_dim: 512
+    seg_conv1d_3_dim: 128
 
 StereoPvn3dLoss:
   resnet_input_shape : [144,192,3]
-  mse_loss_discount: 0.05
-  ssim_loss_discount: 50
-  mlse_loss_discount: 0.000005
   ssim_max_val: 5
   ssim_filter_size: 11
   ssim_k1: 0.5
   ssim_k2: 1.5
-  kp_loss_discount: 30
-  cp_loss_discount: 30
-  sm_loss_discount: 10
-  deriv_loss_discount: 0.0000
-  hessian_loss_discount: 0.0000
+

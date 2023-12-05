@@ -1,19 +1,28 @@
 import tensorflow as tf
 from tensorflow.keras import Input, Model
 from tensorflow.keras.layers import Conv1D
+from dataclasses import dataclass
 
-
+@dataclass
 class MlpNetsParams:
-    def __init__(self):
-        self.kp_conv1d_1_dim = 1024
-        self.kp_conv1d_2_dim = 512
-        self.kp_conv1d_3_dim = 256
-        self.cp_conv1d_1_dim = 1024
-        self.cp_conv1d_2_dim = 512
-        self.cp_conv1d_3_dim = 128
-        self.seg_conv1d_1_dim = 1024
-        self.seg_conv1d_2_dim = 512
-        self.seg_conv1d_3_dim = 128
+        kp_conv1d_1_dim: int
+        kp_conv1d_2_dim: int
+        kp_conv1d_3_dim: int
+        cp_conv1d_1_dim: int
+        cp_conv1d_2_dim: int
+        cp_conv1d_3_dim: int
+        seg_conv1d_1_dim: int
+        seg_conv1d_2_dim: int
+        seg_conv1d_3_dim: int
+        # self.kp_conv1d_1_dim = 1024
+        # self.kp_conv1d_2_dim = 512
+        # self.kp_conv1d_3_dim = 256
+        # self.cp_conv1d_1_dim = 1024
+        # self.cp_conv1d_2_dim = 512
+        # self.cp_conv1d_3_dim = 128
+        # self.seg_conv1d_1_dim = 1024
+        # self.seg_conv1d_2_dim = 512
+        # self.seg_conv1d_3_dim = 128
 
 
 class MlpNets:

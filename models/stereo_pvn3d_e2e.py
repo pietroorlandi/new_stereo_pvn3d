@@ -1,190 +1,59 @@
 import tensorflow.keras as keras
-from tensorflow.keras import activations
-from tensorflow.keras.layers import (
-    Conv2D,
-    BatchNormalization,
-    Activation,
-    Add,
-    MultiHeadAttention,
-    UpSampling2D,
-    Conv1D
-)
-from tensorflow.keras.regularizers import l2
-from tensorflow.python.keras import Input
-
-# from lib.net.utils import match_choose
 import tensorflow as tf
-
-from models.densefusion import DenseFusionNet, DenseFusionNetParams
 from .pprocessnet import _InitialPoseModel
-from metrics.stereo_pvn3d_metrics import StereoPvn3dMetrics
 from models.pointnet2_tf import _PointNet2TfXModel, PointNet2Params
-
-from tensorflow.keras import Input
-from tensorflow.keras.layers import Conv2D
-from .stereo_layers import (
-    ResInitial,
-    ResUp,
-    ResConv,
-    ResReduce,
-    ResIdentity,
-    StereoAttention,
-    DisparityAttention,
-    ContextAdj,
-)
-
-
+from models.disparity_decoder import DisparityDecoder, DisparityDecoderParams
+from models.resnet_encoder import ResnetEncoder, ResnetEncoderParams
 from .mlp import MlpNets, MlpNetsParams
+from typing import Dict, List
 
-from .utils import match_choose_adp, dpt_2_cld, dpt_2_cld_tf, match_choose, pcld_processor_tf
 
-
-class StereoPvn3d(keras.Model):
+class StereoPvn3dE2E(keras.Model):
     def __init__(
         self,
         *,
-        resnet_input_shape,
-        use_disparity,
-        relative_disparity,
-        channel_multiplier,
-        base_channels,
-        num_pts,
-        num_kpts=8, 
-        num_cls=1, 
-        num_cpts=1, 
-        dim_xyz=3,
-        context_adj=False,
+        num_pts: int,
+        num_kpts: int,
+        num_cls: int,
+        num_cpts: int,
+        dim_xyz: int,
+        use_disparity: bool,
+        relative_disparity: bool,
+        res_encoder_params : Dict, 
+        disp_decoder_params: Dict,
+        point_net2_params: Dict,
+        mlp_params: Dict,
         **kwargs,
     ):
-        super(StereoPvn3d, self).__init__()
-        self.use_disparity = use_disparity
-        self.relative_disparity = relative_disparity
-        self.context_adjustment = context_adj
-        self.channel_multiplier = channel_multiplier
+        super(StereoPvn3dE2E, self).__init__()
         self.num_pts = num_pts
         self.num_kpts = num_kpts
         self.num_cls = num_cls
         self.num_cpts = num_cpts
         self.dim_xyz = dim_xyz
-        self.resnet_input_shape = resnet_input_shape
-        self.mlp_params = MlpNetsParams()
-        self.custom_metric = StereoPvn3dMetrics()
-        self.pointnet2params = PointNet2Params()
-        # self.alpha1 = tf.Variable(1., trainable = True) # try to give him less weight, 1.1, try also to focus on the mse by setting 0.9
-        # self.alpha2 = tf.Variable(1., trainable = True)
-        # self.alpha3 = tf.Variable(1., trainable = True)
-        # self.alpha4 = tf.Variable(1., trainable = True)
-        # self.alpha5 = tf.Variable(1., trainable = True)
+        self.use_disparity = use_disparity
+        self.relative_disparity = relative_disparity
+                
+        self.resenc_params = ResnetEncoderParams(**res_encoder_params)
+        self.disp_dec_params = DisparityDecoderParams(**disp_decoder_params)
+        self.pointnet2params = PointNet2Params(**point_net2_params)
+        self.mlp_params = MlpNetsParams(**mlp_params)
+
         self.s1 = tf.Variable(0., trainable = True) # try to give him less weight, 1.1, try also to focus on the mse by setting 0.9
         self.s2 = tf.Variable(0., trainable = True)
         self.s3 = tf.Variable(0., trainable = True)
         self.s4 = tf.Variable(0., trainable = True)
         self.s5 = tf.Variable(0., trainable = True)
 
-        self.segmentation_metric = tf.keras.metrics.CategoricalCrossentropy(from_logits=True)
-        self.base_channels = base_channels
-        self.resnet_lr = self.build_resnet(self.channel_multiplier, self.base_channels, self.resnet_input_shape)
-
-        _, _, f12, f13, f14, f15 = [
-            x * self.channel_multiplier * 2 for x in self.base_channels
-        ]
-
-        _, _, f22, f23, f24, f25 = [
-            x * 4 * self.channel_multiplier * 2 for x in self.base_channels
-        ]
-        #self.attention1 = StereoAttention(channels=8, width=4, depth=f25)
-        self.attention1 = DisparityAttention(max_disparity=6)
-        self.dense_fusion_params = DenseFusionNetParams()
-        # self.dense_fusion_net = DenseFusionNet(self.dense_fusion_params)
-        # self.dense_fusion_model = self.dense_fusion_net.build_dense_fusion_model(
-            # rgb_emb_shape=(num_pts, self.dense_fusion_params.num_embeddings),
-            # pcl_emb_shape=(num_pts, 3))#self.dense_fusion_params.num_embeddings))
-        
-        self.resid1 = ResIdentity(filters=(f14, f24), name="resid_1_1")
-        self.resid2 = ResIdentity(filters=(f14, f24), name="resid_1_2")
-        self.resid3 = ResIdentity(filters=(f14, f24), name="resid_1_3")
-        #self.resid4 = ResIdentity(filters=(f14, f24), name="d5_4")
-        self.resup1 = ResUp(s=2, filters=(f13, f23), name="resup_1")
-        # self.attention2 = StereoAttention(channels=4, width=4, dilation=3)
-
-
-        # self.resred0 = ResReduce(f24)
-
-        self.attention2 = DisparityAttention(max_disparity=3)
-        self.resred1 = ResReduce(f24, name="resred_1")
-        self.resid4 = ResIdentity(filters=(f14, f24), name="resid_2_1")
-        self.resid5 = ResIdentity(filters=(f14, f24), name="resid_2_2")
-        self.resid6 = ResIdentity(filters=(f14, f24), name="resid_2_3")
-        #self.resid8 = ResIdentity(filters=(f14, f24), name="d4_4")
-        self.resup2 = ResUp(s=2, filters=(f13, f23), name="resup_2")
-        # self.attention3 = StereoAttention(channels=4, width=8, dilation=2)
-        self.attention3 = DisparityAttention(max_disparity=3)
-        self.resred2 = ResReduce(f24, name="resred_2")
-        self.resid7 = ResIdentity(filters=(f14, f24), name="resid_3_1")
-        self.resid8 = ResIdentity(filters=(f14, f24), name="resid_3_2")
-        self.resid9 = ResIdentity(filters=(f14, f24), name="resid_3_3")
-        self.resup3 = ResUp(s=2, filters=(f13, f23), name="resup_3")
-        # self.attention4 = StereoAttention(channels=4, width=16, dilation=2)
-        self.attention4 = DisparityAttention(max_disparity=3)
-        self.resred3 = ResReduce(f24, name="resred_3")
-        self.resid10 = ResIdentity(filters=(f14, f24), name="resid_4_1")
-        self.resid11 = ResIdentity(filters=(f14, f24), name="resid_4_2")
-        self.resid12 = ResIdentity(filters=(f14, f24), name="resid_4_3")
-        
-        self.resup4 = ResUp(s=2, filters=(f13, f23), name="resup_4")
-        # self.attention5 = StereoAttention(channels=4, width=32, dilation=2)
-        self.attention5 = DisparityAttention(max_disparity=3)
-        self.resred4 = ResReduce(f24, name="resred_4")
-        self.resid13 = ResIdentity(filters=(f14, f24), name="resid_5_1")
-        self.resid14 = ResIdentity(filters=(f14, f24), name="resid_5_2")
-        self.resid15 = ResIdentity(filters=(f14, f24), name="resid_5_3")
-
-        self.head1 = tf.keras.layers.Conv2D(
-            128, # or 16?
-            kernel_size=(1, 1),
-            strides=(1, 1),
-            padding="valid",
-            kernel_regularizer=tf.keras.regularizers.l2(0.001),
-            name="deph_conv_1",
-        )
-        self.bn = tf.keras.layers.BatchNormalization()
-        self.relu = tf.keras.layers.ReLU()
-        # n_cls = 6  # + background + depth
-        #self.n_rgbd_feats = 
-        
-
-        self.n_rgbd_mlp_feats = 600 #self.dense_fusion_params.num_embeddings + self.dense_fusion_params.rgbd_feats2_conv1d_dim + self.dense_fusion_params.rgb_conv1d_dim + self.dense_fusion_params.pcl_conv1d_dim + 3
-        #self.dense_fusion_layer = Conv1D(filters=self.n_rgbd_mlp_feats, kernel_size=1, activation='relu') # unused
-
-        self.head2 = tf.keras.layers.Conv2D(
-            self.n_rgbd_mlp_feats - 2, # From the total of n_rgbd_mlp_feats should be removed depth and added point cloud
-            kernel_size=(1, 1),
-            strides=(1, 1),
-            padding="valid",
-            kernel_regularizer=tf.keras.regularizers.l2(0.001),
-            name="deph_conv_2",
-            #activation = 'relu',
-        )
-
-        self.disp_head = tf.keras.layers.Conv2D(
-            1, 
-            kernel_size=(1, 1),
-            strides=(1, 1),
-            padding="valid",
-            kernel_regularizer=tf.keras.regularizers.l2(0.001),
-            name="disp_conv",
-        )
-
-
-        self.cal1 = ContextAdj(filter=32)
-        self.cal2 = ContextAdj(filter=64)
-
+        # Resnet Encoder model
+        res_enc = ResnetEncoder(self.resenc_params)
+        self.resnet_lr = res_enc.build_resnet()
+        # Disparity Decoder model
+        self.disparity_decoder = DisparityDecoder(self.disp_dec_params)
         # PointNet++ model
-
         self.pointnet2_model = _PointNet2TfXModel(
                 self.pointnet2params, num_classes=self.num_cls
             )
-
         # MLP model 
         self.mlp_net = MlpNets(self.mlp_params,
                                num_pts= self.num_pts,
@@ -193,12 +62,11 @@ class StereoPvn3d(keras.Model):
                                num_cpts= self.num_cpts,
                                channel_xyz= self.dim_xyz)
 
-        self.mlp_model = self.mlp_net.build_mlp_model(rgbd_features_shape=(self.num_pts, self.n_rgbd_mlp_feats + 125)) # add the features of Ponintnet
-        [H, W, _] = resnet_input_shape
-
-        self.sobel_x = tf.constant([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=tf.float32)
-        self.sobel_y = tf.constant([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=tf.float32)
+        self.mlp_model = self.mlp_net.build_mlp_model(rgbd_features_shape=(self.num_pts, self.disp_dec_params.num_decoder_feats + 125)) # add the features of Ponintnet
         self.initial_pose_model = _InitialPoseModel()
+        # self.sobel_x = tf.constant([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=tf.float32)
+        # self.sobel_y = tf.constant([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=tf.float32)
+        
 
 
     def sample_index(self, b, h, w, roi, num_sample_points):
@@ -258,9 +126,8 @@ class StereoPvn3d(keras.Model):
 
         # crop the image to the aspect ratio for resnet and integer crop factor
         bbox, crop_factor, w_factor_inv, h_factor_inv = self.get_crop_index(
-            roi, h, w, self.resnet_input_shape[0], self.resnet_input_shape[1]
+            roi, h, w, self.resenc_params.resnet_input_shape[0], self.resenc_params.resnet_input_shape[1]
         )  # bbox: [b, 4], crop_factor: [b]
-
 
         sampled_inds_in_roi = self.transform_indices_from_full_image_cropped(
             sampled_inds_in_original_image, bbox, crop_factor
@@ -271,15 +138,14 @@ class StereoPvn3d(keras.Model):
             tf.cast(full_rgb_l, tf.float32),
             norm_bbox,
             tf.range(tf.shape(full_rgb_l)[0]),
-            self.resnet_input_shape[:2],
+            self.resenc_params.resnet_input_shape[:2],
         )/255.
         cropped_rgbs_r = tf.image.crop_and_resize(
             tf.cast(full_rgb_r, tf.float32),
             norm_bbox,
             tf.range(tf.shape(full_rgb_r)[0]),
-            self.resnet_input_shape[:2],
+            self.resenc_params.resnet_input_shape[:2],
         )/255.
-
 
         # stop gradients for preprocessing
         cropped_rgbs_l = tf.stop_gradient(cropped_rgbs_l)
@@ -287,200 +153,49 @@ class StereoPvn3d(keras.Model):
         sampled_inds_in_original_image = tf.stop_gradient(sampled_inds_in_original_image)
         sampled_inds_in_roi = tf.stop_gradient(sampled_inds_in_roi)
 
-
-        # StereoNet ouputs is of dimensions HxWx1032
         f_l_1, f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(cropped_rgbs_l)
         f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
-
-        before_head = f_l_5
-        # print(f"f_l_5: {f_l_5} - f_r_5: {f_r_5}")
-
-        deep = True
-        attention = []
-        # x, w, w_1 = self.attention1(f_l_5, f_r_5)
-        x, w = self.attention1([f_l_5, f_r_5])
-        # x = tf.concat([x, w[-1]], axis=-1)
-        attention.append(x)
-
-        # x = self.resred0(x)
-
-
-        print(f'x after the 1st layer of attention: {x.shape}')
-        if deep:
-            x = self.resid1(x)
-            x = self.resid2(x)
-            x = self.resid3(x)
-        x = (x)
-
-        x = self.resup1(x)
-
-        x_skip = x
-
-        x, w = self.attention2([f_l_4,f_r_4],w)
-        attention.append(x)
-
-        print(f'x after the 2st layer of attention: {x.shape}')
-        x = tf.concat([x, x_skip, w[-1]], axis=-1) #cut the concat and put it in the disparity layer? non avrebbe senso. Forse bisogna cambiare
         
-        x = self.resred1(x)
-        print(f'x after the resred1: {x.shape}')
-        if deep:
-            x = self.resid4(x)
-            x = self.resid5(x)
-            x = self.resid6(x)
-        x = self.resup2(x)
+        stereo_outputs, attended_right, weights = self.disparity_decoder([[f_l_1, f_l_2, f_l_3, f_l_4, f_l_5],
+                                                                [f_r_1, f_r_2, f_r_3, f_r_4, f_r_5]])
 
-        x_skip = x
-
-        x, w = self.attention3(
-            [f_l_3,
-            f_r_3],
-            previous_weights=w
-        )
-        attention.append(x)
-
-        print(f'x after the 3st layer of attention: {x.shape}')
-        x = tf.concat([x, x_skip, w[-1]], axis=-1)
-        print(f'x after the concat: {x.shape}')
-   
-        x = self.resred2(x)
-
-        x = self.resid7(x)
-        x = self.resid8(x)
-        x = self.resid9(x)
-
-        x = self.resup3(x)
-
-        x_skip = x
-
-        x, w = self.attention4(
-            [f_l_2, f_r_2], previous_weights=w,
-        )
-        attention.append(x)
-
-        print(f'x after the 4st layer of attention: {x.shape}')
-        x = tf.concat([x, x_skip, w[-1]], axis=-1)
-        print(f'x after the concat: {x.shape}')
-
-        x = self.resred3(x)
-
-        # if deep:
-        #     x = ResIdentity(filters=(f23, f23), name="d2_1")(x)
-        #     x = ResIdentity(filters=(f23, f23), name="d2_2")(x)
-        x = self.resid10(x)
-        x = self.resid11(x)
-        x = self.resid12(x)
-        x = self.resup4(x)
-
-        x_skip = x
-
-        x, w = self.attention5(
-            [f_l_1,
-            f_r_1],
-            previous_weights=w,
-        )
-        attention.append(x)
-        print(f'x after the 5st layer of attention: {x.shape}')
-        #x = tf.concat([x, x_skip, w[-1]], axis=-1)
-        x = tf.concat([x, x_skip], axis=-1)
-        print(f'x after the concat: {x.shape}')
-
-        x = self.resred4(x)
-
-        x = self.resid13(x)
-        x = self.resid14(x)
-        x = self.resid15(x)
-        
-
-        x = self.head1(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        stereo_outputs = self.head2(x)
-
-        if self.context_adjustment:
-            raise NotImplementedError
-            adj_outputs = self.cal1(tf.cast(x_l, dtype=tf.float32), outputs)
-            adj_outputs = self.cal2(adj_outputs, outputs)
-            return adj_outputs
+        if self.use_disparity:
+            disp = stereo_outputs[...,:1] # self.disp_head(stereo_outputs)
+            if self.relative_disparity:
+                disp = (
+                    disp * tf.shape(inputs[0])[2]
+                )  # BHWC -> *W converts to absolute disparity
+            y = baseline[:] * focal_length[:] * w_factor_inv[:]
+            y = tf.reshape(y, [-1, 1 ,1, 1])
+            disp = disp * 100 # in the first step disp is too low and depth would be too high
+            disp = tf.where(tf.math.abs(disp)<0.9, 0.0, disp) # delete disp <= 1
+            depth = tf.math.divide_no_nan(y, disp)
         else:
-            if self.use_disparity:
-                # stereo_outputs = tf.nn.leaky_relu(stereo_outputs)
-                disp = stereo_outputs[...,:1] # self.disp_head(stereo_outputs)
-                #disp = tf.where(disp>0, disp+1, tf.math.exp(disp)) 
-                # print('disp as output of the encoder-decoder ', disp)
+            stereo_outputs = tf.nn.leaky_relu(stereo_outputs)
+            depth = stereo_outputs[...,:1] # self.disp_head(stereo_outputs)
 
-                # print('disp after stereo atention', disp)
-                if self.relative_disparity:
-                    disp = (
-                        disp * tf.shape(inputs[0])[2]
-                    )  # BHWC -> *W converts to absolute disparity
-                y = baseline[:] * focal_length[:] * w_factor_inv[:]
-                y = tf.reshape(y, [-1, 1 ,1, 1])
-                disp = disp * 100 # in the first step disp is too low and depth would be too high
-                disp = tf.where(tf.math.abs(disp)<0.9, 0.0, disp) # delete disp <= 1
-                depth = tf.math.divide_no_nan(y, disp)
-                # depth = tf.clip_by_value(depth, 0.0, 100.0)
-                #stereo_seg = tf.concat([depth, stereo_outputs[..., 1:7]], axis=-1) #H x W x (1 + n_cls)
-                # stereo_outputs = tf.concat([depth, stereo_outputs[..., 1:]], axis=-1, name="final_concat") #H x W x (n_features)
-            else:
-                stereo_outputs = tf.nn.leaky_relu(stereo_outputs)
-                depth = stereo_outputs[...,:1] # self.disp_head(stereo_outputs)
-                # disp = tf.where(disp>0, disp+1, tf.math.exp(disp))
-                
-        #y = (baseline * focal_length) / tf.cast(crop_factor, tf.float32)
-        # print(f'w factor inv{w_factor_inv} - h_factor_inv {h_factor_inv} - intrinsics[:, 0, 0] {intrinsics[:, 0, 0]}-' )
         b_new_intrinsics = self.compute_new_b_intrinsics_camera(bbox, crop_factor, intrinsics) # change intrinsics since depth is cropped and scaled
         xyz_pred = self.pcld_processor_tf_by_index(depth+0.00001, b_new_intrinsics, sampled_inds_in_roi) 
-        normal_feats = StereoPvn3d.compute_normal_map(depth+0.00001, b_new_intrinsics) # (b, res_h, res_w, 3)
-        #print(f"normal_feats.shape: {normal_feats.shape}")
+        normal_feats = StereoPvn3dE2E.compute_normal_map(depth+0.00001, b_new_intrinsics) # (b, res_h, res_w, 3)
         normal_feats = tf.gather_nd(normal_feats, sampled_inds_in_roi) # (b, n_points, 3)
-
-        # # Compute the gradient magnitude (norm)
-        # gradient_magnitude = tf.sqrt(tf.square(sobel_x_der) + tf.square(sobel_y_der))
-        # print(f'gradient_magnitude {gradient_magnitude.shape}')
-        # gradient_magnitude = tf.zeros_like(depth)
-        gradient_magnitude = stereo_outputs[..., 1:2]
-
-
-        # Normalize the gradient magnitude (optional)
-        # normalized_magnitude = tf.cast(255.0 * gradient_magnitude / tf.reduce_max(gradient_magnitude), tf.float32)
-
-        #print(f"sampled_inds_in_roi.shape: {sampled_inds_in_roi.shape}")
-        #mask_valid_inds = sampled_inds_in_roi>=0
+        
         depth_emb = tf.gather_nd(depth, sampled_inds_in_roi)
         rgb_emb = tf.gather_nd(stereo_outputs[..., 1:], sampled_inds_in_roi) # tf.where(mask, sampled_inds_in_roi, 0))
         feats = tf.concat([normal_feats, rgb_emb], axis = -1)
         pcld_emb = self.pointnet2_model((xyz_pred, feats), training=training)
-        #print(f"pcld_emb.shape: {pcld_emb.shape}")
-        #pcld_emb = xyz_pred
-        #rgb_emb = tf.where(mask_valid_inds, sampled_inds_in_roi, 0)
-
-        #rgb_emb = match_choose(stereo_outputs, sampled_inds_in_roi)
-
-        # print(f"rgb_emb.shape: {rgb_emb.shape} - rgb_emb: {rgb_emb}")
-
-        # print('rgb_emb ', rgb_emb)
-        camera_scale = 1
 
         feats_fused = tf.concat([pcld_emb, rgb_emb], axis = -1)
-        #print(f"feats_fused.shape: {feats_fused.shape}")
-
-        
         kp, sm, cp = self.mlp_model(feats_fused, training=training)
-        # Replace values of invalid sampled indices [-1, -1, -1] with 0.
-        # kp = self.replace_values_kp_of_invalid_indices(kp, sampled_inds_in_roi, value=0.)
-        # cp = self.replace_values_kp_of_invalid_indices(cp, sampled_inds_in_roi, value=0.)
-        # sm = self.replace_values_seg_of_invalid_indices(sm, sampled_inds_in_roi, value=0.)
 
         if training:
-            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head, w_factor_inv, h_factor_inv, disp, depth_emb)
+            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, weights, attended_right, intrinsics, crop_factor, w_factor_inv, h_factor_inv, disp, depth_emb, normal_feats)
         else:
             batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz_pred, kp, cp, sm, mesh_kpts])
             return (
                 batch_R,
                 batch_t,
                 voted_kpts,
-                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, intrinsics, crop_factor, before_head, w_factor_inv, h_factor_inv, disp, depth_emb )
+                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, weights, attended_right, intrinsics, crop_factor, w_factor_inv, h_factor_inv, disp, depth_emb, normal_feats)
             )
 
 
@@ -826,47 +541,47 @@ class StereoPvn3d(keras.Model):
 
         return tf.cast(sampled_inds_in_roi, tf.int32)
     
-    def build_resnet(self, channel_multiplier, base_channels, resnet_input_shape, deep=False, name="resnet"):
-        f10, f11, f12, f13, f14, f15 = [x * channel_multiplier for x in base_channels]
-        f20, f21, f22, f23, f24, f25 = [x * 4 * channel_multiplier for x in base_channels]
-        input = Input(shape=resnet_input_shape, name="rgb")
-        # write all the code with layers
-        x = ResInitial(filters=(f10, f20), name=f"{name}_initial")(input)
-        if deep:
-            x = ResIdentity(filters=(f10, f20), name=f"{name}_1_1")(x)
-        x_1 = x
-        x = ResConv(s=2, filters=(f11, f21), name=f"{name}_1_2")(x)
-        if deep:
-            x = ResIdentity(filters=(f11, f21), name=f"{name}_2_1")(x)
-            x = ResIdentity(filters=(f11, f21), name=f"{name}_2_2")(x)
-        x_2 = x
-        x = ResConv(s=2, filters=(f12, f22), name=f"{name}_2_3")(x)
-        # 3rd stage
-        if deep:
-            x = ResIdentity(filters=(f12, f22), name=f"{name}_3_1")(x)
-            x = ResIdentity(filters=(f12, f22), name=f"{name}_3_2")(x)
-        x = ResIdentity(filters=(f12, f22), name=f"{name}_3_3")(x)
-        x_3 = x
-        x = ResConv(s=2, filters=(f13, f23), name=f"{name}_3_4")(x)
-        # 4th stage
-        if deep:
-            x = ResIdentity(filters=(f13, f23), name=f"{name}_4_1")(x)
-            x = ResIdentity(filters=(f13, f23), name=f"{name}_4_2")(x)
-            x = ResIdentity(filters=(f13, f23), name=f"{name}_4_3")(x)
-        x = ResIdentity(filters=(f13, f23), name=f"{name}_4_4")(x)
-        x_4 = x
-        x = ResConv(s=2, filters=(f14, f24), name=f"{name}_4_5")(x)
-        # 5th stage
-        if deep:
-            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_1")(x)
-            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_2")(x)
-            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_3")(x)
-            x = ResIdentity(filters=(f14, f24), name=f"{name}_5_4")(x)
-        x = ResIdentity(filters=(f14, f24), name=f"{name}_5_5")(x)
-        x_5 = x
+    # def build_resnet(self, channel_multiplier, base_channels, resnet_input_shape, deep=False, name="resnet"):
+    #     f10, f11, f12, f13, f14, f15 = [x * channel_multiplier for x in base_channels]
+    #     f20, f21, f22, f23, f24, f25 = [x * 4 * channel_multiplier for x in base_channels]
+    #     input = Input(shape=resnet_input_shape, name="rgb")
+    #     # write all the code with layers
+    #     x = ResInitial(filters=(f10, f20), name=f"{name}_initial")(input)
+    #     if deep:
+    #         x = ResIdentity(filters=(f10, f20), name=f"{name}_1_1")(x)
+    #     x_1 = x
+    #     x = ResConv(s=2, filters=(f11, f21), name=f"{name}_1_2")(x)
+    #     if deep:
+    #         x = ResIdentity(filters=(f11, f21), name=f"{name}_2_1")(x)
+    #         x = ResIdentity(filters=(f11, f21), name=f"{name}_2_2")(x)
+    #     x_2 = x
+    #     x = ResConv(s=2, filters=(f12, f22), name=f"{name}_2_3")(x)
+    #     # 3rd stage
+    #     if deep:
+    #         x = ResIdentity(filters=(f12, f22), name=f"{name}_3_1")(x)
+    #         x = ResIdentity(filters=(f12, f22), name=f"{name}_3_2")(x)
+    #     x = ResIdentity(filters=(f12, f22), name=f"{name}_3_3")(x)
+    #     x_3 = x
+    #     x = ResConv(s=2, filters=(f13, f23), name=f"{name}_3_4")(x)
+    #     # 4th stage
+    #     if deep:
+    #         x = ResIdentity(filters=(f13, f23), name=f"{name}_4_1")(x)
+    #         x = ResIdentity(filters=(f13, f23), name=f"{name}_4_2")(x)
+    #         x = ResIdentity(filters=(f13, f23), name=f"{name}_4_3")(x)
+    #     x = ResIdentity(filters=(f13, f23), name=f"{name}_4_4")(x)
+    #     x_4 = x
+    #     x = ResConv(s=2, filters=(f14, f24), name=f"{name}_4_5")(x)
+    #     # 5th stage
+    #     if deep:
+    #         x = ResIdentity(filters=(f14, f24), name=f"{name}_5_1")(x)
+    #         x = ResIdentity(filters=(f14, f24), name=f"{name}_5_2")(x)
+    #         x = ResIdentity(filters=(f14, f24), name=f"{name}_5_3")(x)
+    #         x = ResIdentity(filters=(f14, f24), name=f"{name}_5_4")(x)
+    #     x = ResIdentity(filters=(f14, f24), name=f"{name}_5_5")(x)
+    #     x_5 = x
 
-        output = [x_1, x_2, x_3, x_4, x_5]
-        model = keras.Model(inputs=input, outputs=output, name=f"{name}_model")
+    #     output = [x_1, x_2, x_3, x_4, x_5]
+    #     model = keras.Model(inputs=input, outputs=output, name=f"{name}_model")
 
-        return model
+    #     return model
 

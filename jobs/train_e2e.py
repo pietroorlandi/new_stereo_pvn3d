@@ -6,8 +6,8 @@ import cv2
 
 import cvde
 from losses.stereopvn3d_loss import StereoPvn3dLoss
-from models.stereopvn3d import StereoPvn3d
-from losses.stereopvn3d_loss import StereoPvn3dLoss
+from models.stereo_pvn3d_e2e import StereoPvn3dE2E
+# from losses.stereopvn3d_loss import StereoPvn3dLoss
 
 
 from models.pprocessnet import _InitialPoseModel
@@ -26,9 +26,9 @@ class TrainE2E(cvde.job.Job):
         self.num_validate = job_cfg["num_validate"]
         self.freeze = job_cfg['freeze']
         print("Running job: ", self.name)
-        print(f"job_cfg['StereoPvn3d']: {job_cfg['StereoPvn3d']}")
+        print(f"job_cfg['StereoPvn3dE2E']: {job_cfg['StereoPvn3dE2E']}")
         
-        self.model = model = StereoPvn3d(**job_cfg["StereoPvn3d"])
+        self.model = model = StereoPvn3dE2E(**job_cfg["StereoPvn3dE2E"])
         # print('model.alpha1', model.alpha1)
         # self.loss = StereoPvn3dLoss(**job_cfg["StereoPvn3dLoss"])
 
@@ -103,16 +103,8 @@ class TrainE2E(cvde.job.Job):
                 batch_is_valid = tf.reduce_all(tf.reduce_all(tf.not_equal(b_roi, 0), axis=1)) # avoid cases where roi == (0,0,0,0)
                 if batch_is_valid:
                     with tf.GradientTape() as tape:
-
                         pred = model(x, training=True)
-                        # print('len of model.layers', len(model.layers))
-                        # for layer in model.layers[:5]:
-                        #     print('layer: ', layer)
-                        #     layer.trainable = False
-                        #b_cropped_l = pred[8]
-                        # print(f'len of sampled index {pred[5].shape[1]}')
-                        # print(f'kp = pred[1] {tf.math.reduce_mean(pred[1]).numpy()}')
-                        loss_combined, mse_loss, mlse_loss, ssim_loss, deriv_loss, loss_cp, loss_kp, loss_seg, loss_he, loss_dpt_emb = loss_fn.call(y, pred, model.s1, model.s2, model.s3, model.s4, model.s5) # , loss_pcld
+                        loss_combined, mse_loss, mlse_loss, mae_normals, loss_cp, loss_kp, loss_seg, loss_he, loss_dpt_emb = loss_fn.call(y, pred, model.s1, model.s2, model.s3, model.s4, model.s5) # , loss_pcld
                         print(f'loss_combined before applying backprop {loss_combined}')
                     gradients = tape.gradient(loss_combined, model.trainable_variables)
                     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
@@ -125,8 +117,8 @@ class TrainE2E(cvde.job.Job):
                     loss_vals["loss"] = loss_vals.get("loss", []) + [loss_combined.numpy()]
                     loss_vals["mse_loss"] = loss_vals.get("mse_loss", []) + [mse_loss.numpy()]
                     loss_vals["mlse_loss"] = loss_vals.get("mlse_loss", []) + [mlse_loss.numpy()]
-                    loss_vals["ssim_loss"] = loss_vals.get("ssim_loss", []) + [ssim_loss.numpy()]
-                    loss_vals["deriv_loss"] = loss_vals.get("deriv_loss", []) + [deriv_loss.numpy()]
+                    loss_vals["mae_normals"] = loss_vals.get("mae_normals", []) + [mae_normals.numpy()]
+                    # loss_vals["deriv_loss"] = loss_vals.get("deriv_loss", []) + [deriv_loss.numpy()]
                     loss_vals["loss_cp"] = loss_vals.get("loss_cp", []) + [loss_cp.numpy()]
                     loss_vals["loss_kp"] = loss_vals.get("loss_kp", []) + [loss_kp.numpy()]
                     loss_vals["loss_seg"] = loss_vals.get("loss_seg", []) + [loss_seg.numpy()]
@@ -196,12 +188,12 @@ class TrainE2E(cvde.job.Job):
                     gt_disp = tf.math.divide_no_nan(baseline * focal_length, gt_depth)
                     y = (y[0], y[1], y[2], gt_disp)
                     _, _, _, pred = model(x, training=False)
-                    loss_combined, mse_loss, mlse_loss, ssim_loss, deriv_loss, loss_cp, loss_kp, loss_seg, loss_he, loss_dpt_emb = loss_fn.call(y, pred, model.s1, model.s2, model.s3, model.s4, model.s5)
+                    loss_combined, mse_loss, mlse_loss, mae_normals, loss_cp, loss_kp, loss_seg, loss_he, loss_dpt_emb = loss_fn.call(y, pred, model.s1, model.s2, model.s3, model.s4, model.s5)
                     loss_vals["loss"] = loss_vals.get("loss", []) + [loss_combined.numpy()]
                     loss_vals["mse_loss"] = loss_vals.get("mse_loss", []) + [mse_loss.numpy()]
                     loss_vals["mlse_loss"] = loss_vals.get("mlse_loss", []) + [mlse_loss.numpy()]
-                    loss_vals["ssim_loss"] = loss_vals.get("ssim_loss", []) + [ssim_loss.numpy()]
-                    loss_vals["deriv_loss"] = loss_vals.get("deriv_loss", []) + [deriv_loss.numpy()]
+                    loss_vals["mae_normals"] = loss_vals.get("mae_normals", []) + [mae_normals.numpy()]
+                    # loss_vals["deriv_loss"] = loss_vals.get("deriv_loss", []) + [deriv_loss.numpy()]
                     loss_vals["loss_cp"] = loss_vals.get("loss_cp", []) + [loss_cp.numpy()]
                     loss_vals["loss_kp"] = loss_vals.get("loss_kp", []) + [loss_kp.numpy()]
                     loss_vals["loss_seg"] = loss_vals.get("loss_seg", []) + [loss_seg.numpy()]
@@ -240,16 +232,23 @@ class TrainE2E(cvde.job.Job):
 
             b_depth_gt, b_RT_gt, b_mask_gt = y
 
+            #(
+            #     batch_R,
+            #     batch_t,
+            #     voted_kpts,
+            #     (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attended_right,
+            #  intrinsics, crop_factor, w_factor_inv, h_factor_inv, disp, depth_emb )
+
             (
                 b_R,
                 b_t,
                 b_kpts_pred,
                 (b_depth_pred, b_kp_offset_pred, b_seg_pred, b_cp_offset_pred, b_xyz_pred, b_sampled_inds_in_original_image, b_mesh_kpts, b_norm_bbox, b_cropped_rgbs_l, b_cropped_rgbs_r, b_weights, b_attention, 
-                 b_intrinsics_matrix, b_crop_factor, _, b_w_factor_inv, b_h_factor_inv, b_disp_pred, b_depth_emb),) = self.model(x, training=False)
+                 b_intrinsics_matrix, b_crop_factor, b_w_factor_inv, b_h_factor_inv, b_disp_pred, b_depth_emb, b_normal_feats),) = self.model(x, training=False)
             print(f'In log_visual kp = pred[1] {tf.math.reduce_mean(b_kp_offset_pred).numpy()}')
             h, w = tf.shape(b_rgb)[1], tf.shape(b_rgb)[2]
 
-            # get xyz gt
+            # get xymz gt
             b_xyz_gt = self.model.pcld_processor_tf_by_index(b_depth_gt+0.000001, b_intrinsics, b_sampled_inds_in_original_image)
             b_mask_gt = tf.expand_dims(b_mask_gt, axis=-1) # better to move it to simpose.py
             b_mask_selected = tf.gather_nd(b_mask_gt, b_sampled_inds_in_original_image)
@@ -651,7 +650,7 @@ class TrainE2E(cvde.job.Job):
         # print('scaled image after concat', a.shape)
         im = (a*255).astype(np.uint8)
         im = np.clip(im, 0, 255)
-        print(f"statistic pred_depth plot: min:{np.min(im)} - max: {np.max(im)} - mean: {np.mean(im)} - std: {np.std(im)}")
+        # print(f"statistic pred_depth plot: min:{np.min(im)} - max: {np.max(im)} - mean: {np.mean(im)} - std: {np.std(im)}")
         color_depth = lambda d: cv2.applyColorMap(
             cv2.convertScaleAbs(d, alpha=alpha), cv2.COLORMAP_JET
         )
