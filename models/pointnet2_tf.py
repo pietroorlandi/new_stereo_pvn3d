@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class PointNet2Params:
+    num_out_features: int
     bn: bool
     is_train: bool
     keep_prob: float
@@ -23,7 +24,7 @@ class _PointNet2TfXModel(tf.keras.Model):
         self.keep_prob = self.params.keep_prob
         self.num_classes = num_classes
         self.bn = self.params.bn
-
+        self.num_out_features = self.params.num_out_features
         self.kernel_initializer = "glorot_normal"
         self.kernel_regularizer = None
 
@@ -72,7 +73,7 @@ class _PointNet2TfXModel(tf.keras.Model):
 
         self.fp_3 = Pointnet_FP(mlp=[256, 128], activation=self.activation, bn=self.bn)
 
-        self.fp_4 = Pointnet_FP(mlp=[128, 128, 128], activation=self.activation, bn=self.bn)
+        self.fp_4 = Pointnet_FP(mlp=[128, 128, self.num_out_features], activation=self.activation, bn=self.bn)
 
         self.conv1d = tf.keras.layers.Conv1D(
             filters=self.num_classes, kernel_size=1, activation=None

@@ -6,6 +6,7 @@ from models.disparity_decoder import DisparityDecoder, DisparityDecoderParams
 from models.resnet_encoder import ResnetEncoder, ResnetEncoderParams
 from .mlp import MlpNets, MlpNetsParams
 from typing import Dict, List
+from .pointnet_light import PointNetLightParams, _PointNetLightModel, _PointNetMini
 
 
 class StereoPvn3dE2E(keras.Model):
@@ -22,7 +23,11 @@ class StereoPvn3dE2E(keras.Model):
         res_encoder_params : Dict, 
         disp_decoder_params: Dict,
         point_net2_params: Dict,
+        point_net_light_params: Dict,
         mlp_params: Dict,
+        use_pointnet2: bool,
+        use_pointnet_light: bool, 
+        use_pointnet_mini: bool, 
         **kwargs,
     ):
         super(StereoPvn3dE2E, self).__init__()
@@ -33,10 +38,14 @@ class StereoPvn3dE2E(keras.Model):
         self.dim_xyz = dim_xyz
         self.use_disparity = use_disparity
         self.relative_disparity = relative_disparity
+        self.use_pointnet2 = use_pointnet2
+        self.use_pointnet_light = use_pointnet_light
+        self.use_pointnet_mini = use_pointnet_mini
                 
         self.resenc_params = ResnetEncoderParams(**res_encoder_params)
         self.disp_dec_params = DisparityDecoderParams(**disp_decoder_params)
         self.pointnet2params = PointNet2Params(**point_net2_params)
+        self.pointnetlightparams = PointNetLightParams(**point_net_light_params)
         self.mlp_params = MlpNetsParams(**mlp_params)
 
         self.s1 = tf.Variable(0., trainable = True) # try to give him less weight, 1.1, try also to focus on the mse by setting 0.9
@@ -50,19 +59,39 @@ class StereoPvn3dE2E(keras.Model):
         self.resnet_lr = res_enc.build_resnet()
         # Disparity Decoder model
         self.disparity_decoder = DisparityDecoder(self.disp_dec_params)
+        # PointNet Mini model
+        self.pointnet_mini_model = _PointNetMini()
+
+        # PointNet Light model
+        self.pointnet_light_model = _PointNetLightModel(
+                self.pointnetlightparams, num_classes=self.num_cls)
         # PointNet++ model
         self.pointnet2_model = _PointNet2TfXModel(
-                self.pointnet2params, num_classes=self.num_cls
-            )
+                self.pointnet2params, num_classes=self.num_cls)
+        
+
+        
+        if self.use_pointnet2:
+            num_mlp_input_features = self.pointnet2params.num_out_features + self.disp_dec_params.num_decoder_feats - 1
+        elif self.use_pointnet_light:
+            num_mlp_input_features = self.pointnetlightparams.num_out_features + self.disp_dec_params.num_decoder_feats - 1
+        #     num_mlp_input_features =  
+        elif self.use_pointnet_mini:
+            num_mlp_input_features = 1088 + self.disp_dec_params.num_decoder_feats - 1
+        #     num_mlp_input_features
+        else:
+            num_mlp_input_features = self.disp_dec_params.num_decoder_feats + 6 - 1 # add 3 point's coordinates xyz, 3 surface normals coordinates, remove disparity channel 
         # MLP model 
+
         self.mlp_net = MlpNets(self.mlp_params,
                                num_pts= self.num_pts,
                                num_kpts= self.num_kpts,
                                num_cls= self.num_cls,
                                num_cpts= self.num_cpts,
                                channel_xyz= self.dim_xyz)
+        
 
-        self.mlp_model = self.mlp_net.build_mlp_model(rgbd_features_shape=(self.num_pts, self.disp_dec_params.num_decoder_feats + 125)) # add the features of Ponintnet
+        self.mlp_model = self.mlp_net.build_mlp_model(rgbd_features_shape=(self.num_pts, num_mlp_input_features )) #self.disp_dec_params.num_decoder_feats + 3)) # add the features of Ponintnet
         self.initial_pose_model = _InitialPoseModel()
         # self.sobel_x = tf.constant([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=tf.float32)
         # self.sobel_y = tf.constant([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=tf.float32)
@@ -181,8 +210,18 @@ class StereoPvn3dE2E(keras.Model):
         
         depth_emb = tf.gather_nd(depth, sampled_inds_in_roi)
         rgb_emb = tf.gather_nd(stereo_outputs[..., 1:], sampled_inds_in_roi) # tf.where(mask, sampled_inds_in_roi, 0))
-        feats = tf.concat([normal_feats, rgb_emb], axis = -1)
-        pcld_emb = self.pointnet2_model((xyz_pred, feats), training=training)
+        feats = tf.concat([xyz_pred, normal_feats, rgb_emb], axis = -1)
+
+        if self.use_pointnet2:
+            pcld_emb = self.pointnet2_model((xyz_pred, feats), training=training)
+        elif self.use_pointnet_light:
+            pcld_emb = self.pointnet_light_model((xyz_pred, feats), training=training)
+        elif self.use_pointnet_mini:
+            pcld_emb = self.pointnet_mini_model((feats), training=training)
+            print(f"pcld_emb.shape: {pcld_emb.shape}")
+        else:
+            pcld_emb = tf.concat([xyz_pred, normal_feats], axis = -1)
+
 
         feats_fused = tf.concat([pcld_emb, rgb_emb], axis = -1)
         kp, sm, cp = self.mlp_model(feats_fused, training=training)

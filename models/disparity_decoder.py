@@ -77,7 +77,7 @@ class DisparityDecoder(keras.Model):
         self.relu = tf.keras.layers.ReLU()
 
         self.head2 = tf.keras.layers.Conv2D(
-            self.num_decoder_feats - 2, # From the total of num_decoder_feats should be removed depth and added point cloud
+            self.num_decoder_feats, # From the total of num_decoder_feats should be removed depth and added point cloud
             kernel_size=(1, 1),
             strides=(1, 1),
             padding="valid",
