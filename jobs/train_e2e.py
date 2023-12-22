@@ -35,15 +35,23 @@ class TrainE2E(cvde.job.Job):
         if job_cfg["dataset"] == 'blender':
             train_config = job_cfg["TrainBlender"]
             val_config = job_cfg["ValBlender"]
-            #from datasets.blender import TrainBlender, ValBlender
-            #train_gen = TrainBlender
-            #val_gen = ValBlender
+            # from datasets.blender import TrainBlender, ValBlender
+            # train_gen = TrainBlender
+            # val_gen = ValBlender
         elif job_cfg["dataset"] == '6IMPOSE':
             train_config = job_cfg["Train6IMPOSE"]
             val_config = job_cfg["Val6IMPOSE"]
             from datasets.simpose import Train6IMPOSE, Val6IMPOSE
             train_gen = Train6IMPOSE
             val_gen = Val6IMPOSE
+        elif job_cfg["dataset"] == "sptfrecord":
+            train_config = job_cfg["TrainSPTFRecord"]
+            val_config = job_cfg["ValSPTFRecord"]
+            from datasets.sp_tfrecord import TrainSPTFRecord, ValSPTFRecord
+
+            train_gen = TrainSPTFRecord
+            val_gen = ValSPTFRecord
+            
 
         train_set = train_gen(**train_config)
         # val_set = train_gen(**train_config)
