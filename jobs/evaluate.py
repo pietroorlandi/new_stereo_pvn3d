@@ -1,4 +1,4 @@
-from tqdm import tqdm
+# from tqdm import tqdm
 from millify import millify
 import tensorflow as tf
 import numpy as np
@@ -12,29 +12,45 @@ from losses.stereopvn3d_loss import StereoPvn3dLoss
 
 from datasets.blender import ValBlender
 from datasets.simpose import Val6IMPOSE
+from datasets.sp_tfrecord import ValSPTFRecord
 from datasets.linemod import LineMOD
 
 
 class Evaluate(cvde.job.Job):
     def run(self):
         job_cfg = self.config
-        print(f"job_cfg: {job_cfg}")
+        # print(f"job_cfg: {job_cfg}")
 
         self.num_validate = job_cfg["num_validate"]
-        simpose_config = job_cfg["Val6IMPOSE"]
-        print(f"simpose_config: {simpose_config}")
-
 
         model = StereoPvn3dE2E(**job_cfg["StereoPvn3dE2E"])
+
+        if job_cfg["dataset"] == 'blender':
+            val_config = job_cfg["ValBlender"]
+        elif job_cfg["dataset"] == '6IMPOSE':
+            val_config = job_cfg["Val6IMPOSE"]
+            # print(f"simpose_config: {simpose_config}")
+        elif job_cfg["dataset"] == "sptfrecord":
+            val_config = job_cfg["ValSPTFRecord"]
 
         datasets = {}
 
         eval_len = lambda x: len(x) // x.batch_size
 
         with tf.device("/cpu:0"):
-            if "6IMPOSE" in job_cfg["dataset"]:
+            if job_cfg["dataset"] == 'blender':
                 try:
-                    simpose = Val6IMPOSE(**simpose_config)
+                    simpose = ValBlender(**val_config)
+                    simpose_tf = simpose.to_tf_dataset()
+                    datasets["simpose"] = (simpose_tf, eval_len(simpose))
+                    print(f"simpose.mesh_vertices : { simpose.mesh_vertices}")
+                    self.mesh_vertices = simpose.mesh_vertices
+                except Exception as e:
+                    print("Blender dataset not found, skipping...")
+                    print(e)
+            elif "6IMPOSE" in job_cfg["dataset"]:
+                try:
+                    simpose = Val6IMPOSE(**val_config)
                     simpose_tf = simpose.to_tf_dataset()
                     datasets["simpose"] = (simpose_tf, eval_len(simpose))
                     print(f"simpose.mesh_vertices : { simpose.mesh_vertices}")
@@ -42,9 +58,19 @@ class Evaluate(cvde.job.Job):
                 except Exception as e:
                     print("Simpose dataset not found, skipping...")
                     print(e)
+            elif "sptfrecord" in job_cfg["dataset"]:
+                try:
+                    simpose = ValSPTFRecord(**val_config)
+                    simpose_tf = simpose.to_tf_dataset().take(10000)
+                    datasets["simpose"] = (simpose_tf, eval_len(simpose))
+                    print(f"simpose.mesh_vertices : { simpose.mesh_vertices}")
+                    self.mesh_vertices = simpose.mesh_vertices
+                    print('SPTFrecord dataset loaded')
+                except Exception as e:
+                    print("Sptfrecord dataset not found, skipping...")
+                    print(e)
             else:
                 print("fddjfjkfd")
-
 
         pairwise_distance = np.linalg.norm(
             self.mesh_vertices[None, :, :] - self.mesh_vertices[:, None, :], axis=-1
@@ -57,7 +83,7 @@ class Evaluate(cvde.job.Job):
         model.load_weights(path)
 
         loss_fn = StereoPvn3dLoss(**job_cfg["StereoPvn3dLoss"])
-
+        
         for name, (dataset_tf, length) in datasets.items():
             loss_vals = self.eval(name, model, dataset_tf, length, loss_fn)
             if loss_vals is None:
@@ -99,6 +125,7 @@ class Evaluate(cvde.job.Job):
                 w,
                 model.resenc_params.resnet_input_shape[0],
                 model.resenc_params.resnet_input_shape[1],
+                return_w_h_factors=True,
             )
 
             b_rgb_original = b_rgb_original.numpy()
@@ -164,7 +191,7 @@ class Evaluate(cvde.job.Job):
                     return
 
                 vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices, mesh_vertices_gt)
-                self.tracker.log(name, vis_mesh, index=i)
+                self.tracker.log(f'{name}, {i}', vis_mesh, index=i)
 
                 i = i + 1
                 bar.update(1)
@@ -225,11 +252,14 @@ class Evaluate(cvde.job.Job):
         # self.mesh_vertices
         ad = []
         ads = []
+        iter = 0
         for x, y in tqdm(
             dataset,
             desc=f"Validating {name}",
             total=length,
         ):
+            print('cicle for iteration ', iter)
+            iter+=1
             gt_depth = y[0]
             #self.image_index+=1
             baseline = x[2]
@@ -250,12 +280,15 @@ class Evaluate(cvde.job.Job):
             
 
             l = loss_fn.call(y, pred, s1=tf.constant(1.), s2=tf.constant(0.001), s3=tf.constant(0.001), s4=tf.constant(0.001), s5=tf.constant(0.001))
-            for k, v in zip(["loss", "loss_cp", "loss_kp", "loss_seg"], l):
+    
+            for k, v in zip(["loss", "mae_loss", " mae_disp_loss", "mae_normal_loss_scaled", "loss_cp", "loss_kp", "loss_seg", "hessian_loss", "depth_emb_loss"], l):
                 loss_vals[k] = loss_vals.get(k, []) + [v]
 
             # get batch homogeneous transformation matrix from batch_R and batch_t
             average_distance, average_distance_s = self.calc_ad_ads(batch_R, batch_t, b_RT_gt)
+            print('avg dist', average_distance)
             ad.extend(average_distance)
+            print('ln of ad', len(ad))
             ads.extend(average_distance_s)
 
             # loss_vals["add"] = loss_vals.get("add", []) + [average_distance]
@@ -265,13 +298,24 @@ class Evaluate(cvde.job.Job):
             loss_vals[k] = tf.reduce_mean(v)
 
         threshold = 0.1 * self.object_diameter
+        # print('object_diameter', self.object_diameter)
+        # print('threshold', threshold)
         ad = np.array(ad)
+        # print('ad list', ad)
+        # print(len(ad))
+        # print('-------------')
         ads = np.array(ads)
-        ad = np.count_nonzero(ad < threshold) / len(ad)
-        ads = np.count_nonzero(ads < threshold) / len(ads)
+        # print('ads list', ads)
+        # print(len(ads))
+        # print('-------------')
+        ad = np.count_nonzero(ad < threshold) / (len(ad))
+        ads = np.count_nonzero(ads < threshold) / (len(ads))
         loss_vals["add"] = np.array(ad * 100.0)
         loss_vals["add_s"] = np.array(ads * 100.0)
+        print('AD', loss_vals["add"])
+        print('ADS', loss_vals["add_s"])
         return l[0]
+
 
     def calc_ad_ads(self, batch_R, batch_t, b_RT_gt):
         b_mesh = np.tile(self.mesh_vertices, (b_RT_gt.shape[0], 1, 1))

@@ -3,11 +3,11 @@ from millify import millify
 import tensorflow as tf
 import numpy as np
 import cv2
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"]="6,7"
 import cvde
 from losses.stereopvn3d_loss import StereoPvn3dLoss
 from models.stereo_pvn3d_e2e import StereoPvn3dE2E
-# from losses.stereopvn3d_loss import StereoPvn3dLoss
 
 
 from models.pprocessnet import _InitialPoseModel
@@ -20,13 +20,17 @@ class TrainE2E(cvde.job.Job):
         self.gt_depth = None
         #self.image_index = 0
 
-    def run(self):
-        job_cfg = self.config
 
+    def run(self):
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
+        print("GPU Name: ", tf.test.gpu_device_name())
+        job_cfg = self.config
+        self.name = job_cfg['name']
         self.num_validate = job_cfg["num_validate"]
         self.freeze = job_cfg['freeze']
         print("Running job: ", self.name)
-        print(f"job_cfg['StereoPvn3dE2E']: {job_cfg['StereoPvn3dE2E']}")
+        # print(f"job_cfg['StereoPvn3dE2E']: {job_cfg['StereoPvn3dE2E']}")
         
         self.model = model = StereoPvn3dE2E(**job_cfg["StereoPvn3dE2E"])
         # print('model.alpha1', model.alpha1)
@@ -52,7 +56,6 @@ class TrainE2E(cvde.job.Job):
             train_gen = TrainSPTFRecord
             val_gen = ValSPTFRecord
             
-
         train_set = train_gen(**train_config)
         # val_set = train_gen(**train_config)
         # self.demo_set = train_gen(**train_config)
@@ -62,7 +65,7 @@ class TrainE2E(cvde.job.Job):
         self.mesh_vertices = val_set.mesh_vertices
         self.loss_fn = loss_fn = StereoPvn3dLoss(**job_cfg["StereoPvn3dLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
-
+        
         if 'weights' in job_cfg:
             self.model.load_weights(job_cfg['weights'])
 
@@ -80,6 +83,8 @@ class TrainE2E(cvde.job.Job):
         frequency_plot_results_initially = 500
         frequency_plot_results = frequency_plot_results_initially*10
         
+
+
         for epoch in range(num_epochs):
             bar = tqdm(
                 total=len(train_set) // train_set.batch_size,
@@ -132,7 +137,7 @@ class TrainE2E(cvde.job.Job):
                     loss_vals["loss_seg"] = loss_vals.get("loss_seg", []) + [loss_seg.numpy()]
                     loss_vals["loss_he"] = loss_vals.get("loss_he", []) + [loss_he.numpy()]
                     loss_vals["loss_dpt_emb"] = loss_vals.get("loss_dpt_emb", []) + [loss_dpt_emb.numpy()]
-
+                    
                     # loss_vals["loss_pcld"] = loss_vals.get("loss_pcld", []) + [loss_pcld.numpy()]
 
 
@@ -161,8 +166,8 @@ class TrainE2E(cvde.job.Job):
                     print(f"number of corrupted batch until now: {number_samples_corrupted}")
 
             bar.close()
-
-            model.save(f"checkpoints/{self.tracker.name}/model_{epoch:03}", save_format="tf")
+            
+            model.save(f"checkpoints/{self.name}/model_{epoch:03}", save_format="tf")
             print(f"Saved model for epoch {epoch:03}")
 
             for k, v in loss_vals.items():
