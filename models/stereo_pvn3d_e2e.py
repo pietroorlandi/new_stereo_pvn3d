@@ -155,7 +155,7 @@ class StereoPvn3dE2E(keras.Model):
 
         # crop the image to the aspect ratio for resnet and integer crop factor
         bbox, crop_factor, w_factor_inv, h_factor_inv = self.get_crop_index(
-            roi, h, w, self.resenc_params.resnet_input_shape[0], self.resenc_params.resnet_input_shape[1]
+            roi, h, w, self.resenc_params.resnet_input_shape[0], self.resenc_params.resnet_input_shape[1], return_w_h_factors=True
         )  # bbox: [b, 4], crop_factor: [b]
 
         sampled_inds_in_roi = self.transform_indices_from_full_image_cropped(
@@ -353,7 +353,7 @@ class StereoPvn3dE2E(keras.Model):
         y1, x1, y2, x2 = roi[:, 0], roi[:, 1], roi[:, 2], roi[:, 3]
 
         # normals = PVN3D_E2E.compute_normals(depth, camera_matrix) # [b, h*w, 3]
-        normal_map = StereoPvn3d.compute_normal_map(depth, camera_matrix)  # [b, h,w,3]
+        normal_map = StereoPvn3dE2E.compute_normal_map(depth, camera_matrix)  # [b, h,w,3]
 
         h_depth = tf.shape(depth)[1]
         w_depth = tf.shape(depth)[2]
@@ -415,7 +415,7 @@ class StereoPvn3dE2E(keras.Model):
         return xyz, feats, inds
 
     @staticmethod
-    def get_crop_index(roi, in_h, in_w, resnet_h, resnet_w, px_max_disp = 200):
+    def get_crop_index(roi, in_h, in_w, resnet_h, resnet_w, px_max_disp = 200, return_w_h_factors=False):
         """Given a ROI [y1,x1,y2,x2] in an image with dimensions [in_h, in_w]]
         this function returns the indices and the integer crop factor to crop the image
         according to the original roi, but with the same aspect ratio as [resnet_h, resnet_w]
@@ -466,8 +466,11 @@ class StereoPvn3dE2E(keras.Model):
         y1_new = tf.where(y2_new > in_h, in_h - crop_h, y1_new)
         y2_new = tf.where(y2_new > in_h, in_h, y2_new)
 
-        return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor, tf.cast(1/w_factor, tf.float32), tf.cast(1/h_factor, tf.float32)
-    
+        if return_w_h_factors:
+            return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor, tf.cast(1/w_factor, tf.float32), tf.cast(1/h_factor, tf.float32)
+        else:
+            return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor
+             
     @staticmethod
     def compute_new_b_intrinsics_camera(b_roi_cropped, b_crop_factor, b_intrinsics):
         """

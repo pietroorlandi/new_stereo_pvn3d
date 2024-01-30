@@ -1,4 +1,5 @@
 epochs: 100
+name: 'multi_obj_ds_pointnet_light'
 dataset: sptfrecord
 num_validate: 7
 #weights: "checkpoints/TrainE2E_Base_stereopvn_pietro/model_000/" 
@@ -9,8 +10,8 @@ freeze: 0
 
 shared: &shared
   # cutoff: 200
-  root: "/home/pietro/Documents/TUM/support/28_21_dicembre/6impose_dataset"
-  data_name: cpsduck
+  root: "/mnt/scratch1/dataset/6IMPOSE"
+  data_name: cps+lm
   cls_type: cpsduck
   #root: "/home/porlandi/Documents/Dataset/single_img_dataset"
   batch_size: 1
