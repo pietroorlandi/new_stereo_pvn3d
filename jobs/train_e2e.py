@@ -147,16 +147,16 @@ class TrainE2E(cvde.job.Job):
                             "loss": millify(loss_combined.numpy(), precision=4),
                         }
                     )
-                    if cumulative_steps == 0:
-                        print(f"Summary of the model: {model.summary()}")
-                    #weights_resnet_encoder = model.get_layer('resnet_model').get_weights()[0]
-                    # For the first 2000 steps visualization each 500 steps, then less frequent to save disk usage
-                    if cumulative_steps < 2000:
-                        if cumulative_steps%frequency_plot_results_initially == 0:
-                            self.log_visualization(cumulative_steps//frequency_plot_results_initially)
-                    else:
-                        if cumulative_steps%frequency_plot_results == 0:
-                            self.log_visualization(cumulative_steps//frequency_plot_results_initially)
+                    # if cumulative_steps == 0:
+                    #     print(f"Summary of the model: {model.summary()}")
+                    # #weights_resnet_encoder = model.get_layer('resnet_model').get_weights()[0]
+                    # # For the first 2000 steps visualization each 500 steps, then less frequent to save disk usage
+                    # if cumulative_steps < 2000:
+                    #     if cumulative_steps%frequency_plot_results_initially == 0:
+                    #         self.log_visualization(cumulative_steps//frequency_plot_results_initially)
+                    # else:
+                    #     if cumulative_steps%frequency_plot_results == 0:
+                    #         self.log_visualization(cumulative_steps//frequency_plot_results_initially)
 
                     cumulative_steps+=1
                 else:
@@ -175,7 +175,7 @@ class TrainE2E(cvde.job.Job):
                 self.tracker.log(f"train_{k}", loss_vals[k], epoch)
             
 
-            # self.log_visualization(epoch)
+            self.log_visualization(epoch)
 
             loss_vals = {}
             corrupted_batch_validation = 0

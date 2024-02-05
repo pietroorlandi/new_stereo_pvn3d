@@ -670,7 +670,7 @@ class _SPTFRecord(_Dataset):
         self.mesh_kpts = np.concatenate([kpts, center], axis=0)
         self.mesh_kpts_tf = tf.constant(self.mesh_kpts, dtype=tf.float32)
 
-        self._tfds = simpose.data.TFRecordDataset.get(self.data_root, get_keys=keys)
+        self._tfds = simpose.data.TFRecordDataset.get(self.data_root, get_keys=keys, num_parallel_files=1)
 
         # if self.if_augment:
         #     h, w = 1080, 1920  # TODO read from metadata or so
@@ -699,7 +699,7 @@ class _SPTFRecord(_Dataset):
             lambda data: self.extract_crops_and_gt(
                 **data, cls_type=self.cls_type, mesh_kpts_tf=self.mesh_kpts_tf, baseline=self.baseline
             ),
-        ).shuffle(1000)
+        ).shuffle(100)
         self._tfds_iter = iter(self._tfds)
 
         print("Initialized 6IMPOSE Dataset.")
@@ -723,6 +723,7 @@ class _SPTFRecord(_Dataset):
                 arrange_as_xy_tuple, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False
             )
             .batch(self.batch_size, drop_remainder=True, num_parallel_calls=tf.data.AUTOTUNE)
+            #.filter(is_valid_box)
             # .prefetch(tf.data.AUTOTUNE)
             .prefetch(buffer_size=tf.data.AUTOTUNE)
         )
@@ -921,7 +922,7 @@ class _SPTFRecord(_Dataset):
 
     @staticmethod
     @tf.function
-    def matrix_to_quat(quat):
+    def quat_to_matrix(quat):
         x, y, z, w = quat[0], quat[1], quat[2], quat[3]
         tx = 2.0 * x
         ty = 2.0 * y
@@ -971,79 +972,154 @@ class _SPTFRecord(_Dataset):
         obj_visib_fract,
         cls_type,
         mesh_kpts_tf,
-        baseline = 0.0649
+        baseline = 0.63 # cpsduck ds: 0.0649
     ):
         depth = depth[..., tf.newaxis]
         mask = mask[..., tf.newaxis]
 
-        cam_rot_matrix = _SPTFRecord.matrix_to_quat(cam_rotation)
+        cam_rot_matrix = _SPTFRecord.quat_to_matrix(cam_rotation)
 
         cam_location = cam_location[..., tf.newaxis]
         cam_rot_matrix = tf.transpose(cam_rot_matrix)
-
-        # 1) only use objects of correct class
-        is_correct_cls = obj_classes == cls_type
-
-        # 2) dont use objects at borders
         h, w = tf.shape(rgb)[0], tf.shape(rgb)[1]
-        is_not_at_left_border = obj_bbox_visib[:, 0] > 0
-        is_not_at_right_border = obj_bbox_visib[:, 2] < w
-        is_not_at_top_border = obj_bbox_visib[:, 1] > 0
-        is_not_at_bottom_border = obj_bbox_visib[:, 3] < h
-        is_not_at_border = tf.logical_or(
-            tf.logical_or(is_not_at_left_border, is_not_at_right_border),
-            tf.logical_or(is_not_at_top_border, is_not_at_bottom_border),
-        )
-
-        # 3) only use objects that are visible (30% of pixels)
-        is_visible = obj_visib_fract > 0.3
-
-        is_valid = tf.logical_and(is_correct_cls, tf.logical_and(is_visible, is_not_at_border))
 
         @tf.function
-        def assemble(
-            chosen_index,
-            rgb,
-            rgb_R,
-            baseline,
-            depth,
-            cam_matrix,
-            obj_bbox_visib,
-            obj_pos,
-            obj_rot,
-            cam_location,
-            cam_rot_matrix,
-        ):
+        def is_chosen_object(data):
+            return data["obj_classes"] == cls_type
+
+
+        @tf.function
+        def is_valid_box(data):
+            # here bbox is still in x1,y1,x2,y2 format
+            bbox = data["obj_bbox_visib"]
+            bbox_w = bbox[2] - bbox[0]
+            bbox_h = bbox[3] - bbox[1]
+            not_at_border = bbox[0] > 0 and bbox[1] > 0 and bbox[2] < w - 1 and bbox[3] < h - 1
+            return bbox_w > 39 and bbox_h > 39 and not_at_border and data["obj_visib_fract"] > 0.3
+
+        # 1) only use objects of correct class
+        # is_correct_cls = obj_classes == cls_type
+
+        # 2) dont use objects at borders
+        # h, w = tf.shape(rgb)[0], tf.shape(rgb)[1]
+        # is_not_at_left_border = obj_bbox_visib[:, 0] > 0
+        # is_not_at_right_border = obj_bbox_visib[:, 2] < w
+        # is_not_at_top_border = obj_bbox_visib[:, 1] > 0
+        # is_not_at_bottom_border = obj_bbox_visib[:, 3] < h
+        # is_not_at_border = tf.logical_or(
+        #     tf.logical_or(is_not_at_left_border, is_not_at_right_border),
+        #     tf.logical_or(is_not_at_top_border, is_not_at_bottom_border),
+        # )
+
+        # 3) only use objects that are visible (30% of pixels)
+        # is_visible = obj_visib_fract > 0.75
+
+        # is_valid = tf.logical_and(is_correct_cls, tf.logical_and(is_visible, is_not_at_border))
+
+        # @tf.function
+        # def is_valid_box(data):
+        #     # here bbox is still in x1,y1,x2,y2 format
+        #     bbox = data["obj_bbox_visib"]
+        #     bbox_w = bbox[2] - bbox[0]
+        #     bbox_h = bbox[3] - bbox[1]
+        #     not_at_border = bbox[0] > 0 and bbox[1] > 0 and bbox[2] < w - 1 and bbox[3] < h - 1
+        #     return bbox_w > 39 and bbox_h > 39 and not_at_border and data["obj_visib_fract"] > 0.75
+
+
+        @tf.function
+        def assemble(data):
+                        # convert bbox to y1,x1,y2,x2
+            bbox = data["obj_bbox_visib"]
+            bbox_permuted = tf.stack([bbox[1], bbox[0], bbox[3], bbox[2]])
+
+            # calculate RT
+            obj_rot_mat = _SPTFRecord.quat_to_matrix(data["obj_rot"])
+            rot_matrix = cam_rot_matrix @ obj_rot_mat  # (3,3)
+            translation = cam_rot_matrix @ (
+                data["obj_pos"][..., tf.newaxis] - cam_location
+            )  # (3,1)
+            RT = tf.concat([rot_matrix, translation], axis=-1)  # (3,4)
+            RT = tf.concat((RT, tf.constant([[0, 0, 0, 1]], dtype=tf.float32)), axis=0)  # (4,4)
+
+            obj_mask = tf.where(mask == tf.cast(data["obj_ids"], tf.uint8), 1, 0)
+
             return {
                 "rgb": rgb,
                 "rgb_R": rgb_R,
                 "baseline": baseline,
                 "depth": depth,
                 "intrinsics": cam_matrix,
-                "roi": _SPTFRecord.get_bbox(obj_bbox_visib, chosen_index),
-                "RT": _SPTFRecord.get_RT(
-                    obj_pos, obj_rot, cam_location, cam_rot_matrix, chosen_index
-                ),
-                "mask": _SPTFRecord.get_mask(mask, obj_ids, chosen_index),
+                "roi": bbox_permuted,
+                "RT": RT,
+                "mask": obj_mask,
                 "mesh_kpts": mesh_kpts_tf,
             }
 
-        ds = tf.data.Dataset.from_tensor_slices(tf.where(is_valid)).map(
-            lambda chosen_index: assemble(
-                chosen_index[0],
-                rgb,
-                rgb_R,
-                baseline,
-                depth,
-                cam_matrix,
-                obj_bbox_visib,
-                obj_pos,
-                obj_rot,
-                cam_location,
-                cam_rot_matrix,
+        return (
+            tf.data.Dataset.from_tensor_slices(
+                {
+                    "obj_classes": obj_classes,
+                    "obj_bbox_visib": obj_bbox_visib,
+                    "obj_visib_fract": obj_visib_fract,
+                    "obj_pos": obj_pos,
+                    "obj_rot": obj_rot,
+                    "obj_ids": obj_ids,
+                }
             )
+            .filter(is_chosen_object)
+            .filter(is_valid_box)
+            .map(assemble, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
         )
-        return ds
+
+
+
+
+
+
+        # @tf.function
+        # def assemble(
+        #     chosen_index,
+        #     rgb,
+        #     rgb_R,
+        #     baseline,
+        #     depth,
+        #     cam_matrix,
+        #     obj_bbox_visib,
+        #     obj_pos,
+        #     obj_rot,
+        #     cam_location,
+        #     cam_rot_matrix,
+        # ):
+        #     return {
+        #         "rgb": rgb,
+        #         "rgb_R": rgb_R,
+        #         "baseline": baseline,
+        #         "depth": depth,
+        #         "intrinsics": cam_matrix,
+        #         "roi": _SPTFRecord.get_bbox(obj_bbox_visib, chosen_index),
+        #         "RT": _SPTFRecord.get_RT(
+        #             obj_pos, obj_rot, cam_location, cam_rot_matrix, chosen_index
+        #         ),
+        #         "mask": _SPTFRecord.get_mask(mask, obj_ids, chosen_index),
+        #         "mesh_kpts": mesh_kpts_tf,
+        #     }
+
+        # ds = tf.data.Dataset.from_tensor_slices(tf.where(is_valid)).map(
+        #     lambda chosen_index: assemble(
+        #         chosen_index[0],
+        #         rgb,
+        #         rgb_R,
+        #         baseline,
+        #         depth,
+        #         cam_matrix,
+        #         obj_bbox_visib,
+        #         obj_pos,
+        #         obj_rot,
+        #         cam_location,
+        #         cam_rot_matrix,
+        #     )
+        # )
+        # return ds
 
     @staticmethod
     @tf.function
@@ -1051,7 +1127,7 @@ class _SPTFRecord(_Dataset):
         pos = obj_pos[chosen][..., tf.newaxis]
         # rot = R.from_quat(data[self.spds.OBJ_ROT][chosen])
         quat = obj_rot[chosen]
-        rot = _SPTFRecord.matrix_to_quat(quat)
+        rot = _SPTFRecord.quat_to_matrix(quat)
 
         rot_matrix = cam_rot @ rot  # (3,3)
         translation = cam_rot @ (pos - cam_pos)  # (3,1)

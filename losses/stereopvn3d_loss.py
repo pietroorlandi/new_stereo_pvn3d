@@ -104,8 +104,13 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # in_loss = abs_diff
         # l1_loss =tf.reduce_sum(in_loss) / (num_nonzero + 1e-3)
         diff = tf.math.abs(pred_ofst - targ_ofst)  # (b, n_pts, n_kpts, 3)
-        mask = tf.cast(mask_labels[:, :, tf.newaxis, :], tf.float32)  # (b, n_pts, 1, 3)
-        masked_diff = diff * mask
+        print('diff', diff.shape)
+        print('mask_labels', mask_labels.shape)
+        # try:
+        masked_diff = diff * tf.cast(mask_labels, tf.float32)
+        # except:
+        #     mask = tf.cast(mask_labels[:, :, tf.newaxis, :], tf.float32)  # (b, n_pts, 1, 3)
+        #     masked_diff = diff * mask
         num_on_object = tf.math.reduce_sum(tf.cast(mask_labels, tf.float32))
         # loss = tf.math.reduce_mean(masked_diff)/(tf.math.reduce_mean(mask)) 
         loss = tf.reduce_sum(masked_diff) / (1e-5 + num_on_object) # lukas loss
@@ -157,8 +162,12 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         pcld_xyz = tf.expand_dims(pcld_xyz, axis=2)  # [b, n_pts, 1, 3] # add_kpts dim
         offsets = tf.subtract(kpts_cpts_cam, pcld_xyz)  # [b, n_pts, 9, 3]
         # mask offsets to the object points
-
-        offsets = offsets * tf.cast(mask_selected[:, :, tf.newaxis], tf.float32)
+        print('offsets:', offsets.shape)
+        print('mask_selected', mask_selected.shape)
+        try:
+            offsets = offsets * tf.cast(mask_selected[:, :, tf.newaxis], tf.float32)
+        except:
+            offsets = offsets * tf.cast(mask_selected, tf.float32)
         # offsets = tf.where(mask_selected[:, :, tf.newaxis] == 1, offsets, 0.0)
         kp_offsets = offsets[:, :, :-1, :]  # [b, n_pts, 8, 3]
         cp_offsets = offsets[:, :, -1:, :]  # [b, n_pts, 1, 3]
@@ -275,9 +284,12 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         # else:
         # mask_label = tf.cast(mask_label, dtype=tf.float32)
         # pred_sm = tf.cast(pred_sm, dtype=tf.float32)
-
-
-        loss_seg = self.BinaryFocalLoss(mask_selected, pred_sm)  # labels [bs, n_pts, n_cls] this is from logits
+        print('mask_selected', mask_selected.shape)
+        print('pred_sm', pred_sm.shape)
+        try:
+            loss_seg = self.BinaryFocalLoss(mask_selected[:,:,:,0], pred_sm)  # labels [bs, n_pts, n_cls] this is from logits
+        except:
+            loss_seg = self.BinaryFocalLoss(mask_selected, pred_sm)
         # change in something similiar: tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False, reduction=self.reduction)
 
 
