@@ -18,7 +18,7 @@ from typing import Dict
 #import minexr
 from .utils import EXR
 from losses.pvn_loss import PvnLoss
-from models.stereopvn3d import StereoPvn3d
+from models.stereo_pvn3d_e2e import StereoPvn3dE2E
 from models.utils import get_pcld_rgb
 from .augment import add_background_depth, augment_depth, augment_rgb
 
@@ -206,20 +206,20 @@ class _6IMPOSE(_Dataset):
         c2.write(RT)
 
         from losses.pvn_loss import PvnLoss
-        from models.stereopvn3d import StereoPvn3d
+        from models.stereopvn3d import StereoPvn3dE2E
 
         num_samples = st.select_slider("num_samples", [2**i for i in range(5, 13)])
         margin = st.slider("margin", 0, 200, 0, step=50)
 
         h, w = rgb.shape[:2]
-        _bbox, _crop_factor = StereoPvn3d.get_crop_index(
+        _bbox, _crop_factor = StereoPvn3dE2E.get_crop_index(
             bboxes[None], h, w, 160, 160
         )  # bbox: [b, 4], crop_factor: [b]
 
         print(f"Intrinsics.shape: {intrinsics.shape} - intrinsics: {intrinsics} - intrisics[None]: {intrinsics[None].astype(np.float32)}")
         # xyz: [b, num_points, 3]
         # inds:  # [b, num_points, 3] with last 3 is index into original image
-        xyz, feats, inds = StereoPvn3d.pcld_processor_tf(
+        xyz, feats, inds = StereoPvn3dE2E.pcld_processor_tf(
             (rgb[None] / 255.0).astype(np.float32),
             depth[None].astype(np.float32),
             intrinsics[None].astype(np.float32),

@@ -1,7 +1,8 @@
-epochs: 100
-name: 'multi_obj_ds_pointnet_light'
+epochs: 200
+name: 'multi_obj_ds_pointnet_light_cpsduck_pretrained_resnet2'
 dataset: sptfrecord
 num_validate: 7
+# weights_: "checkpoints/multi_obj_ds_pointnet_light_normals_on_entire_img/model_052/"
 #weights: "checkpoints/TrainE2E_Base_stereopvn_pietro/model_000/" 
 #weights: "checkpoints/cpsduck (continued)/model_*"
 #weights: "checkpoints/lm_cam (continued)/model_*"
@@ -10,14 +11,14 @@ freeze: 0
 
 shared: &shared
   # cutoff: 200
-  root: "/mnt/scratch1/dataset/6IMPOSE"
-  data_name: cps+lm
+  root: "/mnt/archive/dataset"
+  data_name: stereodropjects
   cls_type: cpsduck
   #root: "/home/porlandi/Documents/Dataset/single_img_dataset"
-  batch_size: 1
+  batch_size: 8
   use_cache: True
   bbox_noise: 20 # shift by how many pixels
-  n_objects_per_image: 5
+  n_objects_per_image: 1
   if_pose: true
   train_split: 0.9
 
@@ -49,6 +50,7 @@ StereoPvn3dE2E:
   use_pointnet2: false
   use_pointnet_light: true # 'true' option not available
   use_pointnet_mini: false
+  normals_on_entire_image: true
 
 
   res_encoder_params:
@@ -56,10 +58,13 @@ StereoPvn3dE2E:
     base_channels: [1, 2, 4, 8, 16, 32]
     resnet_input_shape : [144, 192, 3]
     deep: False
+    layers_to_save: [2, 32, 71, 149]
+    freeze: false
+
 
   disp_decoder_params:
     channel_multiplier: 4 # original: 4
-    base_channels: [1, 2, 4, 8, 16, 32]
+    base_channels: [1, 2, 8, 8, 16, 32]
     num_decoder_feats: 600
 
   point_net2_params:
