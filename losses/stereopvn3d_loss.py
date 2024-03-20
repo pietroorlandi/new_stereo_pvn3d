@@ -176,6 +176,9 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
     def call(self, y_true_list, y_pred_list, s1, s2, s3, s4, s5):
         # Get data
         [gt_depth, gt_RT, gt_mask, gt_disp] = y_true_list[0], y_true_list[1], y_true_list[2], y_true_list[3]
+        b, h, w = tf.shape(gt_depth)[0], tf.shape(gt_depth)[1], tf.shape(gt_depth)[2]
+        print(f'b{b}, h{h}, w{w} ')
+
         gt_mask = tf.expand_dims(gt_mask, axis=-1) # better to move this to simpose.py
         norm_bbox = y_pred_list[7]
         # depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, w, attention, normalized_magnitude
@@ -200,8 +203,12 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         )
 
         gt_depth = gt_depth[..., :1]
-        normal_gt = StereoPvn3dE2E.compute_normal_map(gt_depth, intrinsics)
-        normal_gt = tf.gather_nd(normal_gt, sampled_inds_in_original_image) # (b, n_points, 3)
+        
+
+        normals_on_entire_image=True
+        if normals_on_entire_image==False:
+            normal_gt = StereoPvn3dE2E.compute_normal_map(gt_depth, intrinsics)
+            normal_gt = tf.gather_nd(normal_gt, sampled_inds_in_original_image) # (b, n_points, 3)
 
         gt_disp = gt_disp[..., :1]
         pred_depth = pred_depth[..., :1]
@@ -217,6 +224,11 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
                         tf.range(tf.shape(gt_disp)[0]),
                         self.resnet_input_shape[:2]
                     )
+
+        if normals_on_entire_image==True:
+            bbox = norm_bbox * [h, w, h, w]
+            b_new_intrinsics = StereoPvn3dE2E.compute_new_b_intrinsics_camera(bbox, crop_factor, intrinsics) 
+            normal_gt = StereoPvn3dE2E.compute_normal_map(gt_depth, b_new_intrinsics)
 
 
         w_factor_inv = tf.reshape(w_factor_inv, [-1, 1 ,1, 1])
@@ -256,6 +268,7 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         hessian_loss = self.mse(hessian_m, hessian_m_pred)
 
         #l1_loss = self.l1(gt_depth, pred_depth)
+
         mae_loss = self.mae(gt_depth, pred_depth_masked)
         # mlse_loss = self.mlse(gt_depth, pred_depth)
 
@@ -267,6 +280,10 @@ class StereoPvn3dLoss(tf.keras.losses.Loss):
         mlse_disp_loss = self.mlse(gt_disp, disp_pred)
         ssim_loss_value = self.ssim_loss(gt_depth, pred_depth_masked)
         ssim_disp_loss_value = self.ssim_loss(gt_disp, disp_pred)
+
+        print('normal_gt shape', normal_gt.shape)
+        print('normal_pred_shape', normal_pred.shape)
+        print()
         mae_normal_loss = self.mae(normal_gt, normal_pred)
 
         # pvn3d loss functions

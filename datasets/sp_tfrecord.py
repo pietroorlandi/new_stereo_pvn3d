@@ -614,9 +614,9 @@ class _SPTFRecord(_Dataset):
         self.n_objects_per_image = n_objects_per_image
         self.add_bbox_noise = add_bbox_noise
         self.bbox_noise = bbox_noise
-        self.baseline = 0.0649
 
         self.data_root = pathlib.Path(root).joinpath(data_name)
+        self.root = root
 
         self.spds = ds = simpose.data.Dataset
         keys = [
@@ -638,7 +638,8 @@ class _SPTFRecord(_Dataset):
         # if cutoff is not None:
         #     self.file_ids = self.file_ids[:cutoff]
 
-        mesh_path = self.data_root.joinpath(f"meshes/{self.cls_type}.obj")
+        mesh_path = self.data_root.parent.joinpath(f"0_meshes/{self.cls_type}/{self.cls_type}.obj")
+        print('mesh_path', mesh_path)
         if not mesh_path.exists():
             mesh_path = mesh_path.with_suffix(".ply")
         if not mesh_path.exists():
@@ -647,6 +648,7 @@ class _SPTFRecord(_Dataset):
         self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
 
         mesh_kpts_path = self.data_root.parent.joinpath(f"0_kpts/{self.cls_type}")
+        print('mesh_kpts_path', mesh_kpts_path)
         if not mesh_kpts_path.exists():
             mesh_kpts_path.mkdir(parents=True)
             print("Generating mesh keypoints...")
@@ -697,7 +699,7 @@ class _SPTFRecord(_Dataset):
 
         self._tfds = self._tfds.flat_map(
             lambda data: self.extract_crops_and_gt(
-                **data, cls_type=self.cls_type, mesh_kpts_tf=self.mesh_kpts_tf, baseline=self.baseline
+                **data, cls_type=self.cls_type, mesh_kpts_tf=self.mesh_kpts_tf
             ),
         ).shuffle(100)
         self._tfds_iter = iter(self._tfds)
@@ -712,7 +714,7 @@ class _SPTFRecord(_Dataset):
 
     def to_tf_dataset(self):
         def arrange_as_xy_tuple(d):
-            return (d["rgb"], d["rgb_R"], d["baseline"], d["intrinsics"], d["roi"], d["mesh_kpts"]), (
+            return (d["rgb"], d["rgb_R"], d["stereo_baseline"], d["intrinsics"], d["roi"], d["mesh_kpts"]), (
                 d["depth"],
                 d["RT"],
                 d["mask"]
@@ -907,12 +909,15 @@ class _SPTFRecord(_Dataset):
     def __getitem__(self, idx):
         # WE IGNORE INDICES AND JUST ITERATE THROUGH THE DATASET
         data = next(self._tfds_iter)
-        data["baseline"] = 0.0649 # TODO: fix this baseline
+        print('DATASET \n',data)
+        print(f'BASELINE: \n {data["stereo_baseline"]} \n')
+        # data["baseline"] = 0.0649 # TODO: fix this baseline
         return {
             "rgb": data["rgb"].numpy().astype(np.uint8),
             "rgb_R": data["rgb_R"].numpy().astype(np.uint8),
-            "baseline": data["baseline"],
+            "stereo_baseline": data["stereo_baseline"],
             "depth": data["depth"].numpy().astype(np.float32),
+            # "depth_R": data["depth_R"].numpy().astype(np.float32),
             "intrinsics": data["intrinsics"].numpy().astype(np.float32),
             "roi": data["roi"].numpy().astype(np.int32),
             "RT": data["RT"].numpy().astype(np.float32),
@@ -960,10 +965,12 @@ class _SPTFRecord(_Dataset):
         rgb,
         rgb_R,
         depth,
+        depth_R,
         mask,
         cam_location,
         cam_rotation,
         cam_matrix,
+        stereo_baseline,
         obj_bbox_visib,
         obj_classes,
         obj_ids,
@@ -972,7 +979,11 @@ class _SPTFRecord(_Dataset):
         obj_visib_fract,
         cls_type,
         mesh_kpts_tf,
-        baseline = 0.63 # cpsduck ds: 0.0649
+        obj_px_count_valid,
+        obj_px_count_visib,
+        obj_px_count_all,
+        obj_bbox_obj,
+
     ):
         depth = depth[..., tf.newaxis]
         mask = mask[..., tf.newaxis]
@@ -1046,7 +1057,7 @@ class _SPTFRecord(_Dataset):
             return {
                 "rgb": rgb,
                 "rgb_R": rgb_R,
-                "baseline": baseline,
+                "stereo_baseline": stereo_baseline,
                 "depth": depth,
                 "intrinsics": cam_matrix,
                 "roi": bbox_permuted,

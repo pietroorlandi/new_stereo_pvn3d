@@ -3,10 +3,20 @@ import tensorflow as tf
 from .pprocessnet import _InitialPoseModel
 from models.pointnet2_tf import _PointNet2TfXModel, PointNet2Params
 from models.disparity_decoder import DisparityDecoder, DisparityDecoderParams
-from models.resnet_encoder import ResnetEncoder, ResnetEncoderParams
+from models.pretrained_resnet_encoder import ResnetEncoder, ResnetEncoderParams
 from .mlp import MlpNets, MlpNetsParams
 from typing import Dict, List
 from .pointnet_light import PointNetLightParams, _PointNetLightModel, _PointNetMini
+from .stereo_layers import (
+    ResInitial,
+    ResUp,
+    ResConv,
+    ResReduce,
+    ResIdentity,
+    StereoAttention,
+    DisparityAttention,
+    ContextAdj,
+)
 
 
 class StereoPvn3dE2E(keras.Model):
@@ -28,6 +38,7 @@ class StereoPvn3dE2E(keras.Model):
         use_pointnet2: bool,
         use_pointnet_light: bool, 
         use_pointnet_mini: bool, 
+        normals_on_entire_image: bool,
         **kwargs,
     ):
         super(StereoPvn3dE2E, self).__init__()
@@ -41,6 +52,7 @@ class StereoPvn3dE2E(keras.Model):
         self.use_pointnet2 = use_pointnet2
         self.use_pointnet_light = use_pointnet_light
         self.use_pointnet_mini = use_pointnet_mini
+        self.normals_on_entire_image = normals_on_entire_image
                 
         self.resenc_params = ResnetEncoderParams(**res_encoder_params)
         self.disp_dec_params = DisparityDecoderParams(**disp_decoder_params)
@@ -55,6 +67,8 @@ class StereoPvn3dE2E(keras.Model):
         self.s5 = tf.Variable(0., trainable = True)
 
         # Resnet Encoder model
+        self.res_conv = ResInitial(filters=(4, 16), name=f"Res_initial")
+        self.res_conv2 = ResIdentity(filters=(4, 16), name=f"Res_Conv_1_1")
         res_enc = ResnetEncoder(self.resenc_params)
         self.resnet_lr = res_enc.build_resnet()
         # Disparity Decoder model
@@ -182,9 +196,22 @@ class StereoPvn3dE2E(keras.Model):
         sampled_inds_in_original_image = tf.stop_gradient(sampled_inds_in_original_image)
         sampled_inds_in_roi = tf.stop_gradient(sampled_inds_in_roi)
 
-        f_l_1, f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(cropped_rgbs_l)
-        f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
+        # original
+        # f_l_1, f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(cropped_rgbs_l)
+        # f_r_1, f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
+
+        # pretrained
+        f_l_1 = self.res_conv2(self.res_conv(cropped_rgbs_l))
+        f_r_1 = self.res_conv2(self.res_conv(cropped_rgbs_r))
+        f_l_2, f_l_3, f_l_4, f_l_5 = self.resnet_lr(cropped_rgbs_l)
+        f_r_2, f_r_3, f_r_4, f_r_5 = self.resnet_lr(cropped_rgbs_r)
         
+        print('Check resnet output dimensions')
+        print(f_l_1.shape)
+        print(f_l_2.shape)
+        print(f_l_3.shape)
+        print(f_l_4.shape)
+        print(f_l_5.shape)        
         stereo_outputs, attended_right, weights = self.disparity_decoder([[f_l_1, f_l_2, f_l_3, f_l_4, f_l_5],
                                                                 [f_r_1, f_r_2, f_r_3, f_r_4, f_r_5]])
 
@@ -205,8 +232,16 @@ class StereoPvn3dE2E(keras.Model):
 
         b_new_intrinsics = self.compute_new_b_intrinsics_camera(bbox, crop_factor, intrinsics) # change intrinsics since depth is cropped and scaled
         xyz_pred = self.pcld_processor_tf_by_index(depth+0.00001, b_new_intrinsics, sampled_inds_in_roi) 
-        normal_feats = StereoPvn3dE2E.compute_normal_map(depth+0.00001, b_new_intrinsics) # (b, res_h, res_w, 3)
-        normal_feats = tf.gather_nd(normal_feats, sampled_inds_in_roi) # (b, n_points, 3)
+        normal_feats_loss = StereoPvn3dE2E.compute_normal_map(depth+0.00001, b_new_intrinsics) # (b, res_h, res_w, 3)
+        
+        if self.normals_on_entire_image == True:
+            normal_feats_out = StereoPvn3dE2E.compute_normal_map(depth+0.00001, b_new_intrinsics) # (b, res_h, res_w, 3)
+            normal_feats = tf.gather_nd(normal_feats_out, sampled_inds_in_roi) # (b, n_points, 3)
+        else:
+            normal_feats = StereoPvn3dE2E.compute_normal_map(depth+0.00001, b_new_intrinsics) # (b, res_h, res_w, 3)
+            normal_feats = tf.gather_nd(normal_feats, sampled_inds_in_roi) # (b, n_points, 3)
+            normal_feats_out = normal_feats
+
         
         depth_emb = tf.gather_nd(depth, sampled_inds_in_roi)
         rgb_emb = tf.gather_nd(stereo_outputs[..., 1:], sampled_inds_in_roi) # tf.where(mask, sampled_inds_in_roi, 0))
@@ -227,14 +262,14 @@ class StereoPvn3dE2E(keras.Model):
         kp, sm, cp = self.mlp_model(feats_fused, training=training)
 
         if training:
-            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, weights, attended_right, intrinsics, crop_factor, w_factor_inv, h_factor_inv, disp, depth_emb, normal_feats)
+            return (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, weights, attended_right, intrinsics, crop_factor, w_factor_inv, h_factor_inv, disp, depth_emb, normal_feats_out)
         else:
             batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz_pred, kp, cp, sm, mesh_kpts])
             return (
                 batch_R,
                 batch_t,
                 voted_kpts,
-                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, weights, attended_right, intrinsics, crop_factor, w_factor_inv, h_factor_inv, disp, depth_emb, normal_feats)
+                (depth, kp, sm, cp, xyz_pred, sampled_inds_in_original_image, mesh_kpts, norm_bbox, cropped_rgbs_l, cropped_rgbs_r, weights, attended_right, intrinsics, crop_factor, w_factor_inv, h_factor_inv, disp, depth_emb, normal_feats_out)
             )
 
 
